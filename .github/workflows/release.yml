@@ -1,0 +1,211 @@
+# 发布 Windows 版 rbm。
+#
+# 两份产物、两个入口：`rbm.exe`（控制台子系统，命令行用）和 `rbm-gui.exe`
+# （`-H windowsgui`，GUI 子系统，双击用，加载器不分配控制台）。两份由同一份源码、
+# 同一次构建产出，和仓库根目录 `build.bat` 的产物一一对应。
+#
+# 为什么是两个 job：
+#   - 自检必须在 Windows 上跑——`internal/gui` 依赖 lxn/walk 与 golang.org/x/sys/windows，
+#     两者的文件都带 `//go:build windows`，换到 Linux 主机上连编译都过不去，更别说跑测试。
+#   - 交叉编译放在 Linux 上——`CGO_ENABLED=0` 的 Go 本来就支持 GOOS=windows，唯一要 C 工具链
+#     的是资源文件：`rsrc.syso` 得靠 windres 把 rbm.rc + rbm.manifest 编出来，而 Ubuntu 的
+#     mingw-w64 里就有 `x86_64-w64-mingw32-windres`，装一个 apt 包搞定，Windows runner 上反而
+#     没有现成的 windres。
+#
+# CI 只做到字节层校验（Subsystem / PE32+ / manifest 已嵌入），Linux runner 跑不了 PE，
+# 「双击真能开界面」这一步还需要人工点一次。
+#
+# 三个 action 的版本按 2026-10-16 各自主仓库 README 里的写法取：actions/checkout@v7、
+# actions/setup-go@v7、actions/upload-artifact@v7。
+
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  # 手动触发走同一套构建，产物只进 Artifacts，不建 Release——免得凭空造 tag。
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  GO_VERSION: '1.24.5'
+  CGO_ENABLED: '0'
+  GOTOOLCHAIN: 'local'
+
+jobs:
+  test:
+    name: 自检（windows-latest）
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: gofmt 不留脏文件
+        shell: pwsh
+        run: |
+          $bad = gofmt -l internal/
+          if ($bad) {
+            Write-Host "这些文件没格式化，先跑 gofmt -w internal/:"
+            $bad | ForEach-Object { Write-Host "  $_" }
+            exit 1
+          }
+          Write-Host "gofmt clean"
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test -count=1 ./...
+
+  build:
+    name: 交叉编译两份产物并校验（ubuntu-latest）
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: 定版本号（推 v* tag 用它，手动触发用 dev-短 sha，只进 Artifacts）
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" = "push" ] && [[ "${GITHUB_REF_NAME}" == v* ]]; then
+            ver="${GITHUB_REF_NAME}"
+          else
+            ver="dev-${GITHUB_SHA::7}"
+          fi
+          echo "VER=${ver}" >> "$GITHUB_ENV"
+          echo "版本号：${ver}"
+
+      - name: 装 windres（mingw-w64 的 binutils）
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends mingw-w64
+          WINDRES="$(command -v x86_64-w64-mingw32-windres || command -v windres)"
+          echo "WINDRES=${WINDRES}" >> "$GITHUB_ENV"
+          "${WINDRES}" --version | head -2
+
+      - name: 生成 rsrc.syso（manifest 编进 exe，缺了它一开界面就 TTM_ADDTOOL failed）
+        run: |
+          set -euo pipefail
+          "${WINDRES}" --input=rbm.rc --input-format=rc --output=rsrc.syso --output-format=coff
+          ls -l rsrc.syso
+
+      - name: 编译两份产物
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          GOOS=windows GOARCH=amd64 go build -trimpath -o dist/rbm.exe .
+          GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "-H windowsgui" -o dist/rbm-gui.exe .
+          ls -l dist
+
+      - name: 校验 PE 头与内嵌 manifest，并写发布说明
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, os, struct, sys
+
+          # 与 docs/图形界面使用与解析.md §10 同一套偏移：e_lfanew 在 0x3C，
+          # Subsystem 在 e_lfanew + 4(签名) + 20(COFF 文件头) + 68。中间那 20 字节漏了就读到垃圾。
+          def probe(path):
+              raw = open(path, 'rb').read()
+              pe = struct.unpack_from('<i', raw, 0x3C)[0]
+              magic = struct.unpack_from('<H', raw, pe + 4 + 20)[0]
+              subs = struct.unpack_from('<H', raw, pe + 4 + 20 + 68)[0]
+              refs = raw.count(b'Microsoft.Windows.Common-Controls')
+              sha = hashlib.sha256(raw).hexdigest()
+              print(f'{os.path.basename(path)}: size={len(raw)} pe_off={pe} '
+                    f'opt_magic={magic:#06x} subsystem={subs} manifest_refs={refs} sha256={sha}')
+              if magic != 0x020B:
+                  sys.exit(f'{path}: 不是 PE32+（0x020B），魔数读出来 {magic:#06x}')
+              if refs < 1:
+                  sys.exit(f'{path}: 二进制里找不到 Common-Controls 那行 manifest，rsrc.syso 没生效')
+              return len(raw), subs, sha
+
+          rows = []
+          for path, want in (('dist/rbm.exe', 3), ('dist/rbm-gui.exe', 2)):
+              size, subs, sha = probe(path)
+              if subs != want:
+                  sys.exit(f'{path}: Subsystem 应为 {want}，实际 {subs}')
+              rows.append((path, size, subs, sha))
+
+          ver = os.environ['VER']
+          notes = [
+              f'## rbm {ver}（Windows x86_64）',
+              '',
+              '两份产物、两个入口，同一个内核：',
+              '',
+              '- **`rbm.exe`** —— 控制台子系统（PE Subsystem=3）。命令行子命令用这份',
+              '  （`rbm scan|parts|show|delete|shell`）；不带参数运行开图形界面。',
+              '- **`rbm-gui.exe`** —— GUI 子系统（PE Subsystem=2）。**双击用这份**：加载器不给它',
+              '  分配控制台，所以黑框不是「闪一下就没」而是从头不出现。它也能跑子命令，但在',
+              '  PowerShell 里直接调不会被等待，管道/脚本请继续用 `rbm.exe`。',
+              '',
+              '删除是永久删除，不进回收站、不可恢复；界面与命令行共用同一份 `state.json` 编号。',
+              '用法见仓库里的 `README.md` 与 `docs/`。',
+              '',
+              '| 文件 | 字节 | PE Subsystem | SHA-256 |',
+              '| --- | ---: | ---: | --- |',
+          ]
+          for path, size, subs, sha in rows:
+              notes.append(f'| `{os.path.basename(path)}` | {size:,} | {subs} | `{sha}` |')
+          notes += [
+              '',
+              f'构建环境：Go {os.environ.get("GO_VERSION", "?")}（CGO_ENABLED=0, GOTOOLCHAIN=local）、'
+              f'`-trimpath`、commit `{os.environ.get("GITHUB_SHA", "")[:7]}`、'
+              'windres 由 Ubuntu 的 mingw-w64 提供（本机产物是 Windows binutils 的 windres，'
+              '两边只按上面这张表的字段对齐，不承诺逐字节相同）。',
+              '',
+              '> CI 只做到字节层校验（Subsystem / PE32+ / manifest 已嵌入），'
+              'Linux runner 跑不了 PE，「双击真能开界面」这一步还需要人工点一次。',
+          ]
+          open('RELEASE_NOTES.md', 'w', encoding='utf-8').write('\n'.join(notes) + '\n')
+          print('---- RELEASE_NOTES.md ----')
+          print('\n'.join(notes))
+          PY
+
+      - name: 打包
+        run: |
+          set -euo pipefail
+          cp README.md dist/README.md
+          (cd dist && zip -q "../rbm-${VER}-windows-amd64.zip" rbm.exe rbm-gui.exe README.md)
+          rm dist/README.md
+          sha256sum "rbm-${VER}-windows-amd64.zip" dist/rbm.exe dist/rbm-gui.exe \
+            > "rbm-${VER}-sha256.txt"
+          ls -l "rbm-${VER}-windows-amd64.zip" "rbm-${VER}-sha256.txt"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: rbm-${{ env.VER }}-windows-amd64
+          path: |
+            rbm-${{ env.VER }}-windows-amd64.zip
+            rbm-${{ env.VER }}-sha256.txt
+
+      - name: 发布 GitHub Release（只在推 v* tag 时）
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release create "${GITHUB_REF_NAME}" \
+            --target "${GITHUB_SHA}" \
+            --title "rbm ${GITHUB_REF_NAME}" \
+            --notes-file RELEASE_NOTES.md \
+            "rbm-${VER}-windows-amd64.zip" \
+            "rbm-${VER}-sha256.txt"
+          gh release view "${GITHUB_REF_NAME}"
