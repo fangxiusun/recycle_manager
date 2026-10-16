@@ -115,23 +115,31 @@ func TestBuildStateParamText(t *testing.T) {
 }
 
 func TestBuildStateEmptyAndDefaults(t *testing.T) {
-	if _, err := BuildState(nil, nil, Options{}); err == nil || !strings.Contains(err.Error(), "条目为 0") {
-		t.Errorf("空条目应当报错: %v", err)
+	// 回收站本来就是空的：这不是错误，要落成一份 0 条目 / 0 分区的快照。
+	st, err := BuildState(nil, nil, Options{MaxBuckets: 12, By: "dir", DirLevel: "2"})
+	if err != nil {
+		t.Fatalf("空条目不该报错: %v", err)
+	}
+	if len(st.Items) != 0 || len(st.Parts) != 0 {
+		t.Errorf("空回收站该给 0 条目 0 分区，实得 %d 条目 %d 分区", len(st.Items), len(st.Parts))
+	}
+	if st.Issues == nil {
+		t.Errorf("issues 要落成 []（不能是 null），否则 state.json 口径就变了")
 	}
 	item := &meta.Item{Display: "a.txt", MetaVersion: 2, Epoch: 100, DeletedAt: "1970-01-01 08:01:40",
 		Size: 1, Drive: "C", OrigPath: `C:\a.txt`}
-	st, err := BuildState([]*meta.Item{item}, []string{"一条异常"}, Options{MaxBuckets: 7, By: "dir", DirLevel: "2"})
+	st2, err := BuildState([]*meta.Item{item}, []string{"一条异常"}, Options{MaxBuckets: 7, By: "dir", DirLevel: "2"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := fmt.Sprintf("gap:自动断点(<= %d 桶)", 7); st.Params.Bucket != want {
-		t.Errorf("bucket 留空时的说明应为 %q，实得 %q", want, st.Params.Bucket)
+	if want := fmt.Sprintf("gap:自动断点(<= %d 桶)", 7); st2.Params.Bucket != want {
+		t.Errorf("bucket 留空时的说明应为 %q，实得 %q", want, st2.Params.Bucket)
 	}
-	if st.Params.Drives != "all" {
-		t.Errorf("drives 留空时应记 all，实得 %q", st.Params.Drives)
+	if st2.Params.Drives != "all" {
+		t.Errorf("drives 留空时应记 all，实得 %q", st2.Params.Drives)
 	}
-	if len(st.Issues) != 1 {
-		t.Errorf("异常记录没带进快照: %v", st.Issues)
+	if len(st2.Issues) != 1 {
+		t.Errorf("异常记录没带进快照: %v", st2.Issues)
 	}
 }
 

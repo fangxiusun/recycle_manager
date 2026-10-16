@@ -35,7 +35,8 @@ type Snapshot struct {
 	Overflow *meta.Overflow
 }
 
-// Scan 扫描回收站并分区。条目为 0 时返回 error，不落快照。
+// Scan 扫描回收站并分区。条目为 0 不是错误：回收站本来就是空的，照样落一份空快照，
+// 由调用方按「扫描完成，0 个」报出去。只有指定的盘根本没有当前用户的回收站目录才算用法错。
 func Scan(o Options) (*Snapshot, error) {
 	dirs, err := meta.BinDirs(o.Drives)
 	if err != nil {
@@ -52,11 +53,9 @@ func Scan(o Options) (*Snapshot, error) {
 	return &Snapshot{State: st, Overflow: overflow}, nil
 }
 
-// BuildState 把条目分区成快照。
+// BuildState 把条目分区成快照。items 为空是合法输入：得到一份 Items/Parts 都是空表、
+// 参数照常记录的快照，调用方据此报「扫描完成，0 个」。
 func BuildState(items []*meta.Item, issues []string, o Options) (*store.State, error) {
-	if len(items) == 0 {
-		return nil, fmt.Errorf("回收站里当前用户的条目为 0，无需处理")
-	}
 	bucket := o.Bucket
 	if bucket == "" {
 		bucket = fmt.Sprintf("gap:自动断点(<= %d 桶)", o.MaxBuckets)

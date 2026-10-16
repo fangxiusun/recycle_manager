@@ -430,7 +430,11 @@ func (a *app) printParts(st *store.State, alive bool, sortKey string) {
 		size += p.Size
 	}
 	a.printf("快照时间 %s  参数 %s\n", st.Created, paramsJSON(st.Params))
-	a.printf("条目合计 %d 个 / %s  分区 %d 个  编号 1..%d\n", total, tty.Human(float64(size)), len(st.Parts), len(st.Parts))
+	numbered := fmt.Sprintf("编号 1..%d", len(st.Parts))
+	if len(st.Parts) == 0 {
+		numbered = "没有分区"
+	}
+	a.printf("条目合计 %d 个 / %s  分区 %d 个  %s\n", total, tty.Human(float64(size)), len(st.Parts), numbered)
 	headers := []string{"编号", "时间范围", st.GroupCol(), "元素数", "大小", "index区间", "盘", "剩余", "组内构成/示例"}
 	widths := []int{4, 24, 44, 7, 9, 12, 4, 4, 26}
 	rows := make([][]string, 0, len(chosen))
@@ -513,6 +517,11 @@ func (a *app) cmdScan(o *options) int {
 	a.printf("\n完整清单已写出: %s\n", listPath)
 	if snap.Overflow != nil {
 		a.println("注意: 本次快照只覆盖最老的一部分条目，删完这批再 scan 会拿到剩下的内容。")
+	}
+	if len(st.Parts) == 0 {
+		a.println("回收站里当前用户没有对象（0 个条目），这就是扫描完成的结果，不是错误。")
+		a.println("没有可删的分区；清空回收站之后重新 scan 会拿到同样的 0。")
+		return 0
 	}
 	a.println("下一步: show <编号> 查看内容；delete <编号区间> 分批删除（默认 dry-run，加 --yes 才真删）")
 	return 0

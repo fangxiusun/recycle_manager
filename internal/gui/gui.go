@@ -15,7 +15,6 @@ import (
 
 	"github.com/lxn/walk"
 	. "github.com/lxn/walk/declarative"
-	"github.com/lxn/win"
 	"golang.org/x/sys/windows"
 
 	"rbm/internal/engine"
@@ -44,28 +43,99 @@ var (
 	byDisplay    = []string{"目录 dir（默认）", "字符前缀 prefix", "扩展名 ext", "文件名首段 token"}
 	levelValues  = []string{"1", "2", "3", "full"}
 	levelDisplay = []string{"1 只看所在目录名", "2 上级目录+目录（默认）", "3 更具体", "full 完整路径"}
-	sortValues   = []string{"time", "size", "count"}
-	sortDisplay  = []string{"按时间（默认）", "按大小", "按元素数"}
+	// bucketValues 与 bucketDisplay 一一对应，最后一项是「自定义」，它不给固定写法，
+	// 而是把手填框里的文本原样交给 parts.ParseSpec（所以这里放空串占位）。
+	bucketValues = []string{"", "gap:15m", "gap:1h", "gap:1d",
+		"15m", "30m", "hourly", "daily", "3d", "weekly", "14d",
+		"monthly", "3mo", "6mo", "auto", ""}
+	bucketDisplay = []string{
+		"自动找删除空档（默认）",
+		"只在 ≥15 分钟的空档切开（gap:15m）",
+		"只在 ≥1 小时的空档切开（gap:1h）",
+		"只在 ≥1 天的空档切开（gap:1d）",
+		"每 15 分钟一批（15m）",
+		"每 30 分钟一批（30m）",
+		"每 1 小时一批（hourly）",
+		"每 1 天一批（daily）",
+		"每 3 天一批（3d）",
+		"每 7 天一批（weekly）",
+		"每 14 天一批（14d）",
+		"每 1 个自然月一批（monthly）",
+		"每 3 个自然月一批（3mo）",
+		"每 6 个自然月一批（6mo）",
+		"自动挑最合适的固定粒度（auto）",
+		"自定义：手填写法",
+	}
 )
+
+// bucketIsCustom 说清下拉第 idx 项是不是「自定义」那一项（最后一项）。
+func bucketIsCustom(idx int) bool { return idx == len(bucketDisplay)-1 }
+
+// 日志行的级别前缀：让「扫完了」「拦下了」「报错了」在纯文本日志里也能一眼分开。
+const (
+	logInfo = iota
+	logOK
+	logWarn
+	logErr
+)
+
+// deleteButtonText 把「当前要删的对象」实时写在按钮上：没勾选时是个明显的禁用态文案，
+// 勾了就把分区数和条目数报出来（评价 P0：永久删除按钮要够危险）。
+func deleteButtonText(parts, items int) string {
+	if parts == 0 {
+		return "⚠ 永久删除（未勾选分区）"
+	}
+	return fmt.Sprintf("⚠ 永久删除 %d 个分区 / %d 个条目", parts, items)
+}
+
+// aliveFilterText 解释「只看未删完」这次切换到底改变了什么。这个筛选只隐藏「已经删完」
+// 的分区，而刚扫完的快照里一个都没有 —— 不解释的话界面就像点了没反应（本机实测反馈）。
+func aliveFilterText(on bool, total, shown int) string {
+	hidden := total - shown
+	state := "已关闭（显示全部编号）"
+	if on {
+		state = "已开启（只显示还有未删条目的分区）"
+	}
+	if on && hidden == 0 {
+		return fmt.Sprintf("只看未删完：%s。本快照里还没有「已删完」的分区（%d 个分区全部还有内容），"+
+			"所以视图行数不变。删完一批之后再开，就能看到已清空的分区从列表里消失。", state, total)
+	}
+	return fmt.Sprintf("只看未删完：%s。快照 %d 个分区，隐藏已删完 %d 个，视图 %d 行。",
+		state, total, hidden, shown)
+}
 
 const usageText = `rbm 图形界面 = 命令行内核的一层薄壳，两边共用同一份快照文件。
 
-流程（和命令树一一对应）:
-  1) 窗口一打开自动扫描一次；【扫描 / 重扫】≈ rbm scan —— 按「时间桶 × 原路径
-     分组」给条目编号，写出 state.json 与 scan_list.csv。改了上面的参数就重扫。
-  2) 单击分区表的某一行 ≈ rbm show <编号> —— 右下方明细表列出该分区的内容。
-  3) 在分区最左列点方框（或选中后按空格）勾选要删的分区 ≈ delete 1-5,8-10,16。
-     按住 Shift 再点另一个方框，两点之间（含两端）一起勾选；
-     【按编号勾选】输入 1-5,8-10,16 可以一次勾上一批。
-  4) 【预览删除】≈ rbm delete <编号> --dry-run —— 只把清单打进明细表和日志，不动文件。
-  5) 【永久删除】≈ rbm delete <编号> --yes —— 弹窗确认后真删，逐笔记入 ledger.csv。
+界面按工作流分成六段，从上往下依次操作：
+
+  ① 扫描配置 —— 按工作流只有三样常用项：
+     「按时间分批」= 原来的时间桶，下拉里是「自动找删除空档（默认）/ 每 15 分钟一批 / 每天一批 /
+     每 7 天一批 / 每 3 个自然月一批 …」，最后一项「自定义」才露出手填框（写 daily、30m、3mo、
+     gap:5m、auto 这种原始写法）。
+     「桶内分组」= 每批里按什么归堆，四项：目录 dir（默认，按原来所在目录）/ 字符前缀 prefix
+     （文件名前几个字符）/ 扩展名 ext / 文件名首段 token（下划线、连字符、点之前那段）。
+     只有对当前分组生效的参数才显示：「目录层级」在 目录 dir 下用，「前缀长度」在 字符前缀 prefix /
+     文件名首段 token 下用，切分组时另一项会收起。
+     其余六项（桶数上限、分区上限、小组并入、限定盘符、单次扫描上限、删除保险丝）
+     和快照目录一起收在【▼ 高级参数】里，点开展开、点回收起；收起时值照旧生效。
+  ② 扫描结果 —— 【扫描 / 重扫】≈ rbm scan：先按【按时间分批】切批、再按【桶内分组】归堆，
+     然后给条目编号，写出 state.json 与 scan_list.csv；右边四个数字是此刻的总体状态
+     （分区数 / 对象数 / 未删完 / 已勾选）。改了参数就重扫。
+  ③ 选择分区 —— 【全选】勾上当前视图里所有还有内容的分区，【清空勾选】撤销；
+     也可以在分区表最左列点方框（选中后按空格也行），按住 Shift 点另一个连选一段，
+     或在【按编号勾选】填 1-5,8-10,16 一次勾上一批 ≈ delete 1-5,8-10,16。
+     文件名前缀过滤 = 命令行的 --prefix；只看未删完 = --alive，只隐藏「已删完」的分区，
+     刚扫完的快照没有已删完分区时它不会改变行数，日志会说明原因。
+  ④ 分区列表 —— 单击某一行 ≈ rbm show <编号>，右下方列出该分区的元素。
+  ⑤ 元素明细 —— 没选分区时是空的，选了就给 index / 删除时间 / 大小 / 盘 / 文件名 / 原路径。
+  ⑥ 删除操作 —— 【预览删除】≈ rbm delete <编号> --dry-run，只列清单不动文件；
+     【⚠ 永久删除 N 个分区 / M 个条目】≈ rbm delete <编号> --yes，
+     要在这个弹窗里点【确认永久删除】才会真删，逐笔记入 ledger.csv。
      「删除保险丝」填 N：选中条目数超过 N 就整批不动（等价 --max N）。
 
-两张表都可以点列名排序：点一下升序，再点同一列降序（表头有箭头）。
-排序只动显示顺序，编号和勾选都不变。
-
-前缀过滤 = 命令行的 --prefix：同时作用于明细表和删除选中的分区（在分区内再按文件名前缀收窄）。
-只看未删完 = --alive，排序 = --sort time|size|count。
+两张表都能点列名排序：点一下升序，再点同一列降序（表头有箭头）。排序只动显示顺序，
+编号和勾选都不变，所以原来的「排序」下拉框已经去掉。
+换「只看未删完」会清空勾选（视图变了，留着旧勾选可能删错批次）；点表头排序不清空。
 
 注意：删除是永久删除，不进回收站、不可恢复；编号只在当前这份快照里有效，
 重新扫描会按当前内容重新编号。`
@@ -268,6 +338,30 @@ func (m *partModel) checkedPIDs() []int {
 	return ids
 }
 
+// selectAlive 是【全选】：勾上当前视图里所有还有未删条目的分区，已删完的跳过 ——
+// 那些分区的 $R/$I 已经没了，勾上只会让引擎逐条报「找不到文件」。
+func (m *partModel) selectAlive() (selected, skipped int) {
+	m.checked = map[int]bool{}
+	m.anchor = -1
+	for _, p := range m.rows {
+		if p.Deleted >= p.Count {
+			skipped++
+			continue
+		}
+		m.checked[p.PID] = true
+		selected++
+	}
+	return selected, skipped
+}
+
+// clearChecks 是【清空勾选】，返回原本勾着的个数。
+func (m *partModel) clearChecks() int {
+	n := len(m.checked)
+	m.checked = map[int]bool{}
+	m.anchor = -1
+	return n
+}
+
 // refresh 按当前排序再走一遍（col 为 -1 时不重排），让 walk 重读每行的 Checked。
 func (m *partModel) refresh() {
 	_ = m.Sort(m.col, m.order)
@@ -376,11 +470,20 @@ func itemLess(a, b entry, col int) bool {
 
 type app struct {
 	mw *walk.MainWindow
-	// 分区参数
-	bucket     *walk.LineEdit
-	by         *walk.ComboBox
-	dirLevel   *walk.ComboBox
-	prefixLen  *walk.LineEdit
+	// ① 扫描配置：常调的项。「按时间分批」是下拉里的档位，只有选了「自定义」才露出手填框；
+	// 「桶内分组」决定另外两项要不要显示：目录层级只在 dir 下用到，前缀长度只在 prefix / token
+	// 下用到（见 parts.GroupKey）。
+	bucket            *walk.ComboBox
+	bucketCustomLabel *walk.TextLabel
+	bucketCustom      *walk.LineEdit
+	by                *walk.ComboBox
+	dirLevelLabel     *walk.TextLabel
+	dirLevel          *walk.ComboBox
+	prefixLenLabel    *walk.TextLabel
+	prefixLen         *walk.LineEdit
+	// 高级参数：默认收起，点【▼ 高级参数】展开
+	advBtn     *walk.PushButton
+	advBox     *walk.Composite
 	maxBuckets *walk.LineEdit
 	maxParts   *walk.LineEdit
 	minCount   *walk.LineEdit
@@ -388,29 +491,41 @@ type app struct {
 	maxScan    *walk.LineEdit
 	fuse       *walk.LineEdit
 	stateDir   *walk.LineEdit
-	// 选择与视图
+	// ③ 选择分区
 	idsBox    *walk.LineEdit
+	selectBtn *walk.PushButton
+	idsClear  *walk.PushButton
 	prefixBox *walk.LineEdit
 	aliveOnly *walk.CheckBox
-	sortBy    *walk.ComboBox
 	// 表与文本区
-	partsTV     *walk.TableView
-	itemsTV     *walk.TableView
-	partModel   *partModel
-	itemModel   *itemModel
-	partsHint   *walk.TextLabel
-	detailTitle *walk.TextLabel
-	logBox      *walk.TextEdit
-	progress    *walk.ProgressBar
-	scanBtn     *walk.PushButton
-	previewBtn  *walk.PushButton
-	deleteBtn   *walk.PushButton
-	sbSnapshot  *walk.StatusBarItem
-	sbHint      *walk.StatusBarItem
+	partsTV       *walk.TableView
+	itemsTV       *walk.TableView
+	partModel     *partModel
+	itemModel     *itemModel
+	partsHint     *walk.TextLabel
+	detailTitle   *walk.TextLabel
+	logBox        *walk.TextEdit
+	logCount      *walk.TextLabel
+	progress      *walk.ProgressBar
+	progressLabel *walk.TextLabel
+	scanBtn       *walk.PushButton
+	previewBtn    *walk.PushButton
+	deleteBtn     *walk.PushButton
+	sbState       *walk.StatusBarItem
+	sbSnapshot    *walk.StatusBarItem
+	sbHint        *walk.StatusBarItem
+	// ② 扫描结果概览：分区 / 对象 / 未删完 / 已勾选
+	sumParts   *walk.TextLabel
+	sumItems   *walk.TextLabel
+	sumAlive   *walk.TextLabel
+	sumChecked *walk.TextLabel
 	// 状态
-	st   *store.State
-	busy bool
-	lock []walk.Window // 后台任务期间禁用的控件
+	st       *store.State
+	busy     bool
+	logLines int           // 日志区已有行数，给「0 行」计数用
+	advOpen  bool          // 高级参数那一行是否展开
+	lock     []walk.Window // 后台任务期间禁用的控件
+	notice   *walk.Dialog  // 启动自动扫描期间的小提示窗，扫完自动关，用户也能自己关
 }
 
 // Run 打开主窗口并进入消息循环，窗口关闭后返回进程退出码。
@@ -435,7 +550,7 @@ func (a *app) build() error {
 		AssignTo: &a.mw,
 		Title:    "回收站分批管理 rbm",
 		MinSize:  Size{Width: 1080, Height: 680},
-		Size:     Size{Width: 1400, Height: 860},
+		Size:     Size{Width: 1400, Height: 900},
 		Layout:   VBox{},
 		MenuItems: []MenuItem{
 			Menu{Text: "文件(&F)", Items: []MenuItem{
@@ -444,24 +559,35 @@ func (a *app) build() error {
 				Separator{},
 				Action{Text: "退出", OnTriggered: func() { a.mw.Close() }},
 			}},
+			Menu{Text: "视图(&V)", Items: []MenuItem{
+				Action{Text: "展开 / 收起高级参数", OnTriggered: func() { a.toggleAdvanced() }},
+				Separator{},
+				Action{Text: "全选当前视图的分区", OnTriggered: func() { a.selectAll() }},
+				Action{Text: "清空勾选", OnTriggered: func() { a.clearChecked() }},
+			}},
 			Menu{Text: "帮助(&H)", Items: []MenuItem{
 				Action{Text: "使用说明", OnTriggered: func() { a.showUsage() }},
 				Action{Text: "关于 rbm", OnTriggered: func() { a.showAbout() }},
 			}},
 		},
 		StatusBarItems: []StatusBarItem{
-			{AssignTo: &a.sbSnapshot, Text: "尚未扫描", Width: 520},
+			{AssignTo: &a.sbState, Text: "● 就绪", Width: 110},
+			{AssignTo: &a.sbSnapshot, Text: "尚未扫描", Width: 470},
 			{AssignTo: &a.sbHint, Text: "F5 扫描；勾选分区后先预览再删除", Width: 360},
 		},
-		Children: []Widget{a.paramsBox(), a.actionRow(), a.filterRow(), a.tables(), a.bottom()},
+		Children: []Widget{
+			a.configBox(), a.resultBox(), a.selectBox(), a.tables(), a.deleteBox(), a.bottom(),
+		},
 	}
 	if err := spec.Create(); err != nil {
 		return err
 	}
 
+	// 先给「桶内分组」设默认索引，再给「按时间分批」：两个下拉的 OnCurrentIndexChanged 都会调
+	// applyParamVisibility，而它要读 a.by 的索引；walk 在设索引前 CurrentIndex() 是 -1。
 	a.by.SetCurrentIndex(0)
+	a.bucket.SetCurrentIndex(0)
 	a.dirLevel.SetCurrentIndex(1)
-	a.sortBy.SetCurrentIndex(0)
 	a.prefixLen.SetText(strconv.Itoa(defPrefixLen))
 	a.maxBuckets.SetText(strconv.Itoa(defMaxBuckets))
 	a.maxParts.SetText(strconv.Itoa(defMaxParts))
@@ -471,99 +597,202 @@ func (a *app) build() error {
 	dir := store.DefaultStateDir()
 	a.stateDir.SetText(dir)
 
+	// 高级参数默认收起：收起后不占位，① 只剩「按时间分批 / 桶内分组 / 目录层级 / 前缀长度」这一行。
+	a.advBox.SetAlwaysConsumeSpace(false)
+	a.advBox.SetVisible(false)
+	a.applyParamVisibility()
+
 	a.lock = []walk.Window{
-		a.scanBtn, a.previewBtn, a.deleteBtn, a.bucket, a.by, a.dirLevel, a.prefixLen,
+		a.scanBtn, a.previewBtn, a.deleteBtn, a.bucket, a.bucketCustom, a.by, a.dirLevel, a.prefixLen,
 		a.maxBuckets, a.maxParts, a.minCount, a.drives, a.maxScan, a.fuse, a.stateDir,
-		a.idsBox, a.prefixBox, a.aliveOnly, a.sortBy,
+		a.idsBox, a.prefixBox, a.aliveOnly, a.selectBtn, a.idsClear, a.advBtn,
 	}
 
 	a.partsTV.CurrentIndexChanged().Attach(func() { a.showCurrentDetail() })
 
-	a.log("rbm 图形界面：窗口一打开就按当前回收站自动扫描一次，参数改完点【扫描 / 重扫】(F5)。")
 	a.updateSelectionHint()
 	// 不载入上次的快照：界面要显示回收站此刻的内容，编号也按此刻内容重建。
+	a.showStartupNotice()
 	a.startScan()
 	return nil
 }
 
 // ---------- 界面搭建 ----------
 
-func (a *app) paramsBox() Widget {
+// configBox 是 ① 扫描配置：只有对当前选择生效的项才占位——「目录层级」只在 dir 分组下被
+// parts.GroupKey 用到，「前缀长度」只在 prefix / token 下用到，「写法」手填框只在「自定义」那一项
+// 出现，所以切下拉时这些标签+输入框会跟着显示或收起（applyParamVisibility）。
+// 其余项和快照目录收在【▼ 高级参数】里。
+func (a *app) configBox() Widget {
 	return GroupBox{
-		Title:  "分区参数（改完点【扫描 / 重扫】生效，数字留空按默认值）",
+		Title:  "① 扫描配置（改完点【扫描 / 重扫】生效，数字留空按默认值）",
 		Layout: VBox{},
 		Children: []Widget{
 			Composite{Layout: HBox{}, Children: []Widget{
-				TextLabel{Text: "时间桶"},
-				LineEdit{AssignTo: &a.bucket, MaxSize: Size{Width: 330},
-					CueBanner: "留空=自动断点 gap；可填 daily/hourly/monthly/3mo/30m/gap:5m/auto"},
+				TextLabel{Text: "按时间分批"},
+				ComboBox{AssignTo: &a.bucket, Model: bucketDisplay, MaxSize: Size{Width: 250},
+					ToolTipText: "先按删除时间把条目切成几批：默认在删除记录的空档处切，也可以按固定粒度（每 15 分钟 / 每天 / 每月…），" +
+						"或选「自定义」手填写法。这一项只管切批，每批里再按【桶内分组】分块。",
+					OnCurrentIndexChanged: func() { a.applyParamVisibility() }},
+				TextLabel{AssignTo: &a.bucketCustomLabel, Text: "写法"},
+				LineEdit{AssignTo: &a.bucketCustom, MaxSize: Size{Width: 170},
+					CueBanner: "daily / 30m / 3mo / gap:5m / auto"},
 				TextLabel{Text: "桶内分组"},
-				ComboBox{AssignTo: &a.by, Model: byDisplay, MaxSize: Size{Width: 160}},
-				TextLabel{Text: "目录层级"},
+				ComboBox{AssignTo: &a.by, Model: byDisplay, MaxSize: Size{Width: 160},
+					OnCurrentIndexChanged: func() { a.applyParamVisibility() }},
+				TextLabel{AssignTo: &a.dirLevelLabel, Text: "目录层级"},
 				ComboBox{AssignTo: &a.dirLevel, Model: levelDisplay, MaxSize: Size{Width: 200}},
-				TextLabel{Text: "前缀长度"},
+				TextLabel{AssignTo: &a.prefixLenLabel, Text: "前缀长度"},
 				LineEdit{AssignTo: &a.prefixLen, MaxSize: Size{Width: 56}},
 				HSpacer{},
+				PushButton{AssignTo: &a.advBtn, Text: "▼ 展开高级参数", MaxSize: Size{Width: 140},
+					ToolTipText: "桶数上限 / 分区上限 / 小组并入 / 限定盘符 / 单次扫描上限 / 删除保险丝 / 快照目录",
+					OnClicked:   func() { a.toggleAdvanced() }},
 			}},
-			Composite{Layout: HBox{}, Children: []Widget{
-				TextLabel{Text: "桶数上限"},
-				LineEdit{AssignTo: &a.maxBuckets, MaxSize: Size{Width: 56}},
-				TextLabel{Text: "分区上限"},
-				LineEdit{AssignTo: &a.maxParts, MaxSize: Size{Width: 64}},
-				TextLabel{Text: "小组并入"},
-				LineEdit{AssignTo: &a.minCount, MaxSize: Size{Width: 56}},
-				TextLabel{Text: "限定盘符"},
-				LineEdit{AssignTo: &a.drives, MaxSize: Size{Width: 90}, CueBanner: "留空=全部"},
-				TextLabel{Text: "单次扫描上限"},
-				LineEdit{AssignTo: &a.maxScan, MaxSize: Size{Width: 72}},
-				TextLabel{Text: "删除保险丝"},
-				LineEdit{AssignTo: &a.fuse, MaxSize: Size{Width: 72}, CueBanner: "0=不限"},
-				HSpacer{},
-			}},
-			Composite{Layout: HBox{}, Children: []Widget{
-				TextLabel{Text: "快照目录"},
-				LineEdit{AssignTo: &a.stateDir, StretchFactor: 1,
-					ToolTipText: "state.json / scan_list.csv / ledger.csv 所在目录，命令行 --state-dir 指同一个目录"},
+			Composite{AssignTo: &a.advBox, Layout: VBox{}, Children: []Widget{
+				Composite{Layout: HBox{}, Children: []Widget{
+					TextLabel{Text: "桶数上限"},
+					LineEdit{AssignTo: &a.maxBuckets, MaxSize: Size{Width: 56},
+						ToolTipText: "时间切成几个桶；超过就把最接近的桶并起来"},
+					TextLabel{Text: "分区上限"},
+					LineEdit{AssignTo: &a.maxParts, MaxSize: Size{Width: 64},
+						ToolTipText: "分区总数上限；调小会把小组并成「其他」"},
+					TextLabel{Text: "小组并入"},
+					LineEdit{AssignTo: &a.minCount, MaxSize: Size{Width: 56},
+						ToolTipText: "元素数不到这个数的组合进「其他」"},
+					TextLabel{Text: "限定盘符"},
+					LineEdit{AssignTo: &a.drives, MaxSize: Size{Width: 90}, CueBanner: "留空=全部"},
+					TextLabel{Text: "单次扫描上限"},
+					LineEdit{AssignTo: &a.maxScan, MaxSize: Size{Width: 72},
+						ToolTipText: "超过就只取最老的这些建快照，日志会说明；0 = 不限"},
+					TextLabel{Text: "删除保险丝"},
+					LineEdit{AssignTo: &a.fuse, MaxSize: Size{Width: 72}, CueBanner: "0=不限",
+						ToolTipText: "选中条目数超过这个数就整批不动（等价 --max）"},
+					HSpacer{},
+				}},
+				Composite{Layout: HBox{}, Children: []Widget{
+					TextLabel{Text: "快照目录"},
+					LineEdit{AssignTo: &a.stateDir, StretchFactor: 1,
+						ToolTipText: "state.json / scan_list.csv / ledger.csv 所在目录，命令行 --state-dir 指同一个目录"},
+					PushButton{Text: "打开目录", MaxSize: Size{Width: 92}, OnClicked: func() { a.openStateDir() }},
+					HSpacer{},
+				}},
 			}},
 		},
 	}
 }
 
-func (a *app) actionRow() Widget {
-	return Composite{Layout: HBox{}, Children: []Widget{
-		PushButton{AssignTo: &a.scanBtn, Text: "扫描 / 重扫 (F5)", MaxSize: Size{Width: 150},
-			OnClicked: func() { a.startScan() }},
-		PushButton{AssignTo: &a.previewBtn, Text: "预览删除（不动文件）", MaxSize: Size{Width: 180},
-			OnClicked: func() { a.previewDelete() }},
-		PushButton{AssignTo: &a.deleteBtn, Text: "永久删除勾选的分区", MaxSize: Size{Width: 190},
-			ToolTipText: "真删：不进回收站、不可恢复。会先弹确认框，并受「删除保险丝」约束。",
-			OnClicked:   func() { a.deleteSelected() }},
-		HSpacer{},
-	}}
+// paramsShow 说清「桶内分组」取 by 时哪两项真正被用到：parts.GroupKey 只在 dir 读 dirLevel，
+// 只在 prefix / token 读 prefixLen（ext 两个都不读）。界面据此决定显示哪一项。
+func paramsShow(by string) (level bool, prefixLen bool) {
+	return by == "dir", by == "prefix" || by == "token"
 }
 
-func (a *app) filterRow() Widget {
-	return Composite{Layout: HBox{}, Children: []Widget{
-		TextLabel{Text: "按编号勾选"},
-		LineEdit{AssignTo: &a.idsBox, MaxSize: Size{Width: 160}, CueBanner: "如 1-5,8-10,16"},
-		PushButton{Text: "应用", MaxSize: Size{Width: 64}, OnClicked: func() { a.applyIDs() }},
-		PushButton{Text: "清空勾选", MaxSize: Size{Width: 92}, OnClicked: func() { a.clearChecked() }},
-		TextLabel{Text: "文件名前缀过滤"},
-		LineEdit{AssignTo: &a.prefixBox, MaxSize: Size{Width: 160}, CueBanner: "空=不过滤（同 --prefix）",
-			OnEditingFinished: func() { a.showCurrentDetail() }},
-		CheckBox{AssignTo: &a.aliveOnly, Text: "只看未删完", OnCheckedChanged: func() { a.refreshParts() }},
-		TextLabel{Text: "排序"},
-		ComboBox{AssignTo: &a.sortBy, Model: sortDisplay, MaxSize: Size{Width: 130},
-			OnCurrentIndexChanged: func() { a.refreshParts() }},
-		HSpacer{},
-	}}
+// bucketToken 把下拉选项换成 parts.ParseSpec 认的写法。「自定义」那一项（末尾）取手填框里的
+// 文本（去掉首尾空格，留空就等于默认的自动空档）；越界时按默认。
+func bucketToken(idx int, custom string) string {
+	if bucketIsCustom(idx) {
+		return strings.TrimSpace(custom)
+	}
+	if idx >= 0 && idx < len(bucketValues) {
+		return bucketValues[idx]
+	}
+	return ""
+}
+
+// applyParamVisibility 按「桶内分组」显示/隐藏目录层级与前缀长度，按「按时间分批」显示/隐藏
+// 自定义写法框。隐藏时设成不占位，否则 ① 会留空档。值本身留在控件里，切回来就按原值生效；
+// collectOptions 也照旧读它们。
+func (a *app) applyParamVisibility() {
+	showLevel, showPrefixLen := paramsShow(byValues[a.by.CurrentIndex()])
+	custom := bucketIsCustom(a.bucket.CurrentIndex())
+	for _, pair := range []struct {
+		w     walk.Widget
+		shows bool
+	}{
+		{a.dirLevelLabel, showLevel}, {a.dirLevel, showLevel},
+		{a.prefixLenLabel, showPrefixLen}, {a.prefixLen, showPrefixLen},
+		{a.bucketCustomLabel, custom}, {a.bucketCustom, custom},
+	} {
+		pair.w.SetAlwaysConsumeSpace(pair.shows)
+		pair.w.SetVisible(pair.shows)
+	}
+}
+
+// resultBox 是 ② 扫描结果：扫描按钮 + 四个总体数字，不用看表格也知道此刻的状态。
+func (a *app) resultBox() Widget {
+	return GroupBox{
+		Title:  "② 扫描结果",
+		Layout: VBox{},
+		Children: []Widget{
+			Composite{Layout: HBox{}, Children: []Widget{
+				PushButton{AssignTo: &a.scanBtn, Text: "扫描 / 重扫 (F5)", MaxSize: Size{Width: 150},
+					OnClicked: func() { a.startScan() }},
+				HSpacer{},
+			}},
+			Composite{Layout: HBox{}, Children: []Widget{
+				TextLabel{Text: "分区"},
+				TextLabel{AssignTo: &a.sumParts, MinSize: Size{Width: 150}, TextColor: walk.RGB(0, 80, 160)},
+				TextLabel{Text: "对象"},
+				TextLabel{AssignTo: &a.sumItems, MinSize: Size{Width: 170}, TextColor: walk.RGB(0, 80, 160)},
+				TextLabel{Text: "未删完"},
+				TextLabel{AssignTo: &a.sumAlive, MinSize: Size{Width: 170}, TextColor: walk.RGB(0, 80, 160)},
+				TextLabel{Text: "已勾选"},
+				TextLabel{AssignTo: &a.sumChecked, MinSize: Size{Width: 230}, TextColor: walk.RGB(0, 80, 160)},
+				HSpacer{},
+			}},
+		},
+	}
+}
+
+// selectBox 是 ③ 选择分区：全选 / 清空勾选在最前，然后是按编号勾选、前缀过滤和只看未删完。
+func (a *app) selectBox() Widget {
+	return GroupBox{
+		Title:  "③ 选择分区（勾选 = 要删的批次）",
+		Layout: HBox{},
+		Children: []Widget{
+			PushButton{AssignTo: &a.selectBtn, Text: "全选", MaxSize: Size{Width: 72},
+				ToolTipText: "勾上当前视图里所有还有未删条目的分区（已删完的跳过）",
+				OnClicked:   func() { a.selectAll() }},
+			PushButton{AssignTo: &a.idsClear, Text: "清空勾选", MaxSize: Size{Width: 92},
+				OnClicked: func() { a.clearChecked() }},
+			TextLabel{Text: "按编号勾选"},
+			LineEdit{AssignTo: &a.idsBox, MaxSize: Size{Width: 160}, CueBanner: "如 1-5,8-10,16"},
+			PushButton{Text: "应用", MaxSize: Size{Width: 64}, OnClicked: func() { a.applyIDs() }},
+			TextLabel{Text: "文件名前缀过滤"},
+			LineEdit{AssignTo: &a.prefixBox, MaxSize: Size{Width: 160}, CueBanner: "空=不过滤（同 --prefix）",
+				OnEditingFinished: func() { a.showCurrentDetail(); a.updateSelectionHint() }},
+			CheckBox{AssignTo: &a.aliveOnly, Text: "只看未删完", OnCheckedChanged: func() { a.onAliveToggled() }},
+			HSpacer{},
+		},
+	}
+}
+
+// deleteBox 是 ⑥ 删除操作，放在选完、看完明细之后：预览在前，永久删除在最后并且随时报出规模。
+// 进度条和这两个按钮同一行（原来单独占一行，纵向太吃空间），文字说明它在量什么。
+func (a *app) deleteBox() Widget {
+	return GroupBox{
+		Title:  "⑥ 删除操作（三层闸门：预览 → 弹窗确认 → 保险丝）",
+		Layout: HBox{},
+		Children: []Widget{
+			PushButton{AssignTo: &a.previewBtn, Text: "预览删除（不动文件）", MaxSize: Size{Width: 190},
+				ToolTipText: "只把选中统计和明细打进日志/右表，等价 rbm delete <编号> --dry-run",
+				OnClicked:   func() { a.previewDelete() }},
+			PushButton{AssignTo: &a.deleteBtn, Text: deleteButtonText(0, 0), MaxSize: Size{Width: 280},
+				ToolTipText: "真删：不进回收站、不可恢复。要在弹窗里点【确认永久删除】，并受「删除保险丝」约束。",
+				OnClicked:   func() { a.deleteSelected() }},
+			ProgressBar{AssignTo: &a.progress, MinValue: 0, MaxValue: 100, StretchFactor: 1,
+				MinSize: Size{Width: 140}},
+			TextLabel{AssignTo: &a.progressLabel, MinSize: Size{Width: 270}, Text: "进度 空闲"},
+		},
+	}
 }
 
 func (a *app) tables() Widget {
 	return HSplitter{
 		Children: []Widget{
 			GroupBox{
-				Title:  "分区统计（点方框勾选=要删的分区，按住 Shift 点另一个可以连选一段；单击行看明细）",
+				Title:  "④ 分区列表（点方框勾选=要删的分区，按住 Shift 点另一个可以连选一段；单击行看明细，点列名排序）",
 				Layout: VBox{},
 				// 这行标签和右边明细表的标题行同高，两张表的表头才能对齐。
 				Children: []Widget{
@@ -598,10 +827,10 @@ func (a *app) tables() Widget {
 				StretchFactor: 3,
 			},
 			GroupBox{
-				Title:  "元素明细",
+				Title:  "⑤ 元素明细",
 				Layout: VBox{},
 				Children: []Widget{
-					TextLabel{AssignTo: &a.detailTitle, Text: "（单击左侧某一行看它的元素清单）"},
+					TextLabel{AssignTo: &a.detailTitle, Text: "请选择一个分区：在④里单击任意一行，这里列出它的文件清单"},
 					TableView{
 						AssignTo:            &a.itemsTV,
 						Model:               a.itemModel,
@@ -625,11 +854,21 @@ func (a *app) tables() Widget {
 	}
 }
 
+// bottom 是操作日志：进度条已经并进 ⑥ 那一行，这里只剩标题行 + 日志区。
+// 日志区带【清空】【复制】，行首有时间和级别。
 func (a *app) bottom() Widget {
 	return Composite{
 		Layout: VBox{},
 		Children: []Widget{
-			ProgressBar{AssignTo: &a.progress, MinValue: 0, MaxValue: 100},
+			Composite{Layout: HBox{}, Children: []Widget{
+				TextLabel{Text: "操作日志"},
+				TextLabel{AssignTo: &a.logCount, Text: "0 行"},
+				PushButton{Text: "清空", MaxSize: Size{Width: 64}, OnClicked: func() { a.clearLog() }},
+				PushButton{Text: "复制", MaxSize: Size{Width: 64},
+					ToolTipText: "把整段日志放进剪贴板，方便贴给别人排查",
+					OnClicked:   func() { a.copyLog() }},
+				HSpacer{},
+			}},
 			TextEdit{AssignTo: &a.logBox, ReadOnly: true, VScroll: true, MinSize: Size{Height: 120},
 				Font: Font{Family: "Consolas", PointSize: 9}, StretchFactor: 1},
 		},
@@ -638,13 +877,98 @@ func (a *app) bottom() Widget {
 
 // ---------- 通用 ----------
 
-// log 往日志区追加一行。多行文本要转成 CRLF，Windows 编辑控件才换行。
-func (a *app) log(text string) {
-	a.logBox.AppendText(strings.ReplaceAll(text, "\n", "\r\n") + "\r\n")
-	a.logBox.ScrollToCaret()
+// levelMark 是日志行的级别前缀。
+func levelMark(kind int) string {
+	switch kind {
+	case logOK:
+		return "✓"
+	case logWarn:
+		return "!"
+	case logErr:
+		return "×"
+	}
+	return "·"
 }
 
-func (a *app) logf(format string, args ...interface{}) { a.log(fmt.Sprintf(format, args...)) }
+// emit 往日志区追加一条带时间戳和级别前缀的记录。多行文本要转成 CRLF，Windows 编辑控件才换行；
+// 续行缩进对齐到正文列，扫表那种多行输出读起来才不歪。
+func (a *app) emit(kind int, text string) {
+	stamp := time.Now().Format("15:04:05")
+	pad := strings.Repeat(" ", len(stamp)+len(levelMark(kind))+2)
+	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	var b strings.Builder
+	for i, ln := range lines {
+		if i == 0 {
+			fmt.Fprintf(&b, "%s %s %s", stamp, levelMark(kind), ln)
+		} else {
+			b.WriteString(pad + ln)
+		}
+		if i != len(lines)-1 {
+			b.WriteString("\r\n")
+		}
+	}
+	a.logBox.AppendText(b.String() + "\r\n")
+	a.logBox.ScrollToCaret()
+	a.logLines += len(lines)
+	a.logCount.SetText(fmt.Sprintf("%d 行", a.logLines))
+}
+
+// log 追加一条普通记录（信息级）。
+func (a *app) log(text string) { a.emit(logInfo, text) }
+
+// ok/warn/fail 是成功、提醒、失败三档，用在扫描完成、闸门拦下、报错这些关键节点上。
+func (a *app) ok(text string)   { a.emit(logOK, text) }
+func (a *app) warn(text string) { a.emit(logWarn, text) }
+func (a *app) fail(text string) { a.emit(logErr, text) }
+
+func (a *app) logf(format string, args ...interface{}) {
+	a.emit(logInfo, fmt.Sprintf(format, args...))
+}
+
+func (a *app) okf(format string, args ...interface{}) {
+	a.emit(logOK, fmt.Sprintf(format, args...))
+}
+
+func (a *app) warnf(format string, args ...interface{}) {
+	a.emit(logWarn, fmt.Sprintf(format, args...))
+}
+
+func (a *app) failf(format string, args ...interface{}) {
+	a.emit(logErr, fmt.Sprintf(format, args...))
+}
+
+func (a *app) clearLog() {
+	a.logBox.SetText("")
+	a.logLines = 0
+	a.logCount.SetText("0 行")
+}
+
+// copyLog 把整段日志放进剪贴板。空日志不写剪贴板，免得把用户先前复制的内容冲掉。
+func (a *app) copyLog() {
+	text := a.logBox.Text()
+	if strings.TrimSpace(text) == "" {
+		a.log("日志区是空的，没有可复制的内容。")
+		return
+	}
+	if err := walk.Clipboard().SetText(text); err != nil {
+		a.failf("复制到剪贴板失败: %v", err)
+		return
+	}
+	a.okf("已复制 %d 行日志到剪贴板。", strings.Count(text, "\r\n")+1)
+}
+
+// toggleAdvanced 展开/收起「桶数上限…删除保险丝 + 快照目录」那两行。SetVisible 自己会请求重排，
+// 收起时又设了不占位，所以① 会缩回一行高。
+func (a *app) toggleAdvanced() {
+	a.advOpen = !a.advOpen
+	a.advBox.SetVisible(a.advOpen)
+	if a.advOpen {
+		a.advBtn.SetText("▲ 收起高级参数")
+		return
+	}
+	a.advBtn.SetText("▼ 展开高级参数")
+	a.log("高级参数已收起：桶数上限/分区上限/小组并入/限定盘符/单次扫描上限/删除保险丝/快照目录 仍按里面的值生效。")
+}
 
 func (a *app) partRow(row int) *parts.Part {
 	if row < 0 || row >= len(a.partModel.rows) {
@@ -653,12 +977,15 @@ func (a *app) partRow(row int) *parts.Part {
 	return a.partModel.rows[row]
 }
 
+// beginBusy 后台任务期间锁住参数与动作，状态栏和进度文字都换成「在做什么」。
 func (a *app) beginBusy(text string) {
 	a.busy = true
 	for _, w := range a.lock {
 		w.SetEnabled(false)
 	}
 	a.progress.SetValue(0)
+	a.sbState.SetText("● " + text)
+	a.progressLabel.SetText("进度 " + text)
 	a.sbHint.SetText(text)
 }
 
@@ -667,7 +994,44 @@ func (a *app) endBusy() {
 		w.SetEnabled(true)
 	}
 	a.busy = false
+	a.sbState.SetText("● 就绪")
+	a.progressLabel.SetText("进度 空闲")
 	a.updateSelectionHint()
+}
+
+// showStartupNotice 在启动自动扫描期间开一个非模态小提示窗（扫完自动关，用户也能先自己关掉）。
+// 非模态是必须的：Modal 会把消息循环堵住，扫描 goroutine 回来更新的 Synchronize 就永远排不上。
+func (a *app) showStartupNotice() {
+	var dlg *walk.Dialog
+	err := Dialog{
+		AssignTo:  &dlg,
+		Title:     "正在扫描回收站",
+		FixedSize: true,
+		MinSize:   Size{Width: 360},
+		Layout:    HBox{},
+		Children: []Widget{
+			TextLabel{Text: "正在扫描，请等待完成…"},
+			HSpacer{},
+			PushButton{Text: "关闭", MaxSize: Size{Width: 64}, OnClicked: func() { dlg.Close(0) }},
+		},
+	}.Create(a.mw)
+	if err != nil {
+		a.log("启动提示窗创建失败: " + err.Error())
+		return
+	}
+	// 用户点 X 或【关闭】之后这个 Dialog 已经被销毁，句柄不能再碰，所以先清掉引用。
+	dlg.Closing().Attach(func(canceled *bool, reason walk.CloseReason) { a.notice = nil })
+	a.notice = dlg
+	dlg.Show()
+}
+
+func (a *app) closeNotice() {
+	if a.notice == nil {
+		return
+	}
+	d := a.notice
+	a.notice = nil
+	d.Close(0)
 }
 
 func (a *app) dir() string {
@@ -722,7 +1086,7 @@ func (a *app) collectOptions() (engine.Options, int, error) {
 	}
 	drivesSpec := strings.TrimSpace(a.drives.Text())
 	o := engine.Options{
-		Bucket:     strings.TrimSpace(a.bucket.Text()),
+		Bucket:     bucketToken(a.bucket.CurrentIndex(), a.bucketCustom.Text()),
 		By:         byValues[a.by.CurrentIndex()],
 		DirLevel:   levelValues[a.dirLevel.CurrentIndex()],
 		PrefixLen:  prefixLen,
@@ -767,13 +1131,9 @@ func overflowText(ov *meta.Overflow) string {
 
 func (a *app) setState(st *store.State) {
 	a.st = st
-	a.refreshParts()
-	a.sbSnapshot.SetText(fmt.Sprintf("快照 %s｜条目 %d 个 / %s｜分区 %d 个（编号 1..%d）｜未删完 %d",
-		st.Created, len(st.Items), tty.Human(float64(totalSize(st))), len(st.Parts), len(st.Parts), st.AliveLeft()))
-	if a.partModel.RowCount() > 0 {
-		a.partsTV.SetCurrentIndex(0)
-	}
-	a.showCurrentDetail()
+	a.refreshParts(false)
+	a.sbSnapshot.SetText(fmt.Sprintf("快照 %s｜条目 %d 个 / %s｜分区 %d 个（编号 1..%d）",
+		st.Created, len(st.Items), tty.Human(float64(totalSize(st))), len(st.Parts), len(st.Parts)))
 }
 
 func totalSize(st *store.State) int64 {
@@ -784,41 +1144,72 @@ func totalSize(st *store.State) int64 {
 	return n
 }
 
-// refreshParts 按「只看未删完 / 排序」重画分区表。视图一变，勾选一律清空：
-// 行号和勾选的对应关系变了，留着旧勾选可能删错批次。
-func (a *app) refreshParts() {
+// refreshParts 按「只看未删完」重画分区表；显示顺序交给点表头，所以这里固定用快照自身的
+// 时间顺序。视图一变，勾选一律清空：行号和勾选的对应关系变了，留着旧勾选可能删错批次。
+// explain 为 true 时说明这次筛选改变了什么 —— 刚扫完的快照没有「已删完」的分区，勾上这个框
+// 一行也不会少，不解释看上去就像点了没反应。
+func (a *app) refreshParts(explain bool) {
+	had := len(a.partModel.checked)
 	if a.st == nil {
 		a.partModel.setRows(nil)
+		a.updateSelectionHint()
 		return
 	}
-	a.partModel.setRows(engine.SortedParts(a.st, sortValues[a.sortBy.CurrentIndex()], a.aliveOnly.Checked()))
+	rows := engine.SortedParts(a.st, "time", a.aliveOnly.Checked())
+	a.partModel.setRows(rows)
 	if len(a.st.Parts) > 0 {
 		if err := a.partsTV.Columns().At(2).SetTitle(a.st.GroupCol()); err != nil {
-			a.logf("改列名失败: %v", err)
+			a.failf("改列名失败: %v", err)
 		}
 	}
-	a.log("（分区表已刷新，勾选已清空，请重新勾选要删的分区）")
+	if explain {
+		a.log(aliveFilterText(a.aliveOnly.Checked(), len(a.st.Parts), len(rows)))
+	}
+	if had > 0 {
+		a.warnf("视图换了，原先勾选的 %d 个分区已经取消勾选（留着旧勾选可能删错批次），请重新勾选。", had)
+	}
 	a.updateSelectionHint()
+	// PublishRowsReset 把当前行清成 -1，右栏会跟着空掉；视图非空时回到第一行。
+	if a.partsTV.CurrentIndex() < 0 && len(rows) > 0 {
+		a.partsTV.SetCurrentIndex(0)
+	}
 	a.showCurrentDetail()
 }
+
+// onAliveToggled 是「只看未删完」的处理：刷视图，并把这次到底隐藏了几个说清楚。
+func (a *app) onAliveToggled() { a.refreshParts(true) }
 
 // ---------- 动作 ----------
 
 func (a *app) startScan() {
 	if a.busy {
 		a.log("上一次任务还在跑，请等它结束。")
+		a.closeNotice()
 		return
 	}
 	o, _, err := a.collectOptions()
 	if err != nil {
 		a.log(err.Error())
+		a.closeNotice()
 		return
 	}
 	drives := o.DrivesSpec
 	if drives == "" {
 		drives = "全部盘"
 	}
-	a.log(fmt.Sprintf("开始扫描（%s，单次上限 %s）…", drives, limitText(o.MaxScan)))
+	tier := o.Bucket
+	if tier == "" {
+		tier = fmt.Sprintf("自动找空档（不超过 %d 批）", o.MaxBuckets)
+	}
+	idx := a.bucket.CurrentIndex()
+	if bucketIsCustom(idx) && o.Bucket == "" {
+		a.log("「自定义」的写法留空了，这一轮按默认的自动找删除空档切批。")
+	}
+	label := tier
+	if !bucketIsCustom(idx) && idx >= 0 && idx < len(bucketDisplay) {
+		label = bucketDisplay[idx]
+	}
+	a.log(fmt.Sprintf("开始扫描（%s，按%s分批，单次上限 %s）…", drives, label, limitText(o.MaxScan)))
 	a.beginBusy("扫描中…")
 	dir := o.StateDir
 	go func() {
@@ -833,20 +1224,29 @@ func (a *app) startScan() {
 		elapsed := time.Since(start)
 		a.mw.Synchronize(func() {
 			a.endBusy()
+			a.closeNotice()
 			if err != nil {
-				a.logf("扫描失败: %v", err)
+				a.failf("扫描失败: %v", err)
 				return
 			}
 			a.setState(snap.State)
 			st := snap.State
-			a.log(fmt.Sprintf("扫描完成（用时 %s）：条目 %d 个 / %s，分区 %d 个，编号 1..%d。",
-				elapsed.Round(10*time.Millisecond), len(st.Items), tty.Human(float64(totalSize(st))),
-				len(st.Parts), len(st.Parts)))
+			spent := elapsed.Round(10 * time.Millisecond)
+			a.progressLabel.SetText(fmt.Sprintf("进度 空闲｜上次扫描用时 %s", spent))
+			if len(st.Parts) == 0 {
+				// 回收站本来就是空的：这是扫描完成，不是失败，别让它读起来像出错。
+				a.okf("扫描完成（用时 %s）：条目 0 个、分区 0 个——回收站里当前用户没有对象。"+
+					"这是正常结果，不是错误；没有可删的分区。", spent)
+			} else {
+				a.okf("扫描完成（用时 %s）：条目 %d 个 / %s，分区 %d 个，编号 1..%d。",
+					spent, len(st.Items), tty.Human(float64(totalSize(st))),
+					len(st.Parts), len(st.Parts))
+			}
 			if snap.Overflow != nil {
-				a.log(overflowText(snap.Overflow))
+				a.warn(overflowText(snap.Overflow))
 			}
 			if len(st.Issues) > 0 {
-				a.log(fmt.Sprintf("异常记录 %d 条（全量在 scan_list.csv），示例:", len(st.Issues)))
+				a.warnf("异常记录 %d 条（全量在 scan_list.csv），示例:", len(st.Issues))
 				for i, line := range st.Issues {
 					if i == 5 {
 						break
@@ -855,7 +1255,11 @@ func (a *app) startScan() {
 				}
 			}
 			a.log(fmt.Sprintf("快照已写出: %s\n清单已写出: %s", store.Path(dir), listPath))
-			a.log("下一步：勾选分区 →【预览删除】看清单 →【永久删除】确认。")
+			if len(st.Parts) == 0 {
+				a.log("没有可删的分区。回收站清空之后重新扫描会得到同样的 0。")
+			} else {
+				a.log("下一步：③ 里【全选】或点方框勾选 → ④ 单击看明细 → ⑥【预览删除】核对 → 再点【永久删除】并在弹窗里确认。")
+			}
 		})
 	}()
 }
@@ -891,7 +1295,13 @@ func (a *app) showCurrentDetail() {
 	p := a.partRow(row)
 	if p == nil {
 		a.itemModel.setRows(nil)
-		a.detailTitle.SetText("（当前视图里没有可选的分区；换掉「只看未删完」或重新扫描）")
+		// 重画表格会把当前行清成 -1，所以「有行但没当前行」和「视图真的空了」要分开说，
+		// 否则点开【全选】之后右栏会怪到「只看未删完」头上。
+		if n := len(a.partModel.rows); n > 0 {
+			a.detailTitle.SetText(fmt.Sprintf("（还没点行：视图里有 %d 个分区，单击任一行看它的条目明细）", n))
+		} else {
+			a.detailTitle.SetText("（视图里 0 个分区：去掉「只看未删完」或重新扫描）")
+		}
 		return
 	}
 	prefix := strings.TrimSpace(a.prefixBox.Text())
@@ -934,6 +1344,16 @@ func intsToStrings(xs []int) []string {
 	return out
 }
 
+// briefIDs 只列出前 max 个编号：【全选】120 个分区时把整串塞进确认框，
+// 单行标签会把对话框撑得比屏幕还宽。
+func briefIDs(ids []int, max int) string {
+	if len(ids) <= max {
+		return strings.Join(intsToStrings(ids), ",")
+	}
+	return fmt.Sprintf("%s…（共 %d 个，完整清单在【预览删除】的日志里）",
+		strings.Join(intsToStrings(ids[:max]), ","), len(ids))
+}
+
 // previewDelete 是第一层闸门：只列清单，不碰文件（等价 --dry-run）。
 func (a *app) previewDelete() {
 	if a.st == nil {
@@ -959,7 +1379,7 @@ func (a *app) previewDelete() {
 	a.itemModel.setRows(rows)
 	a.detailTitle.SetText(fmt.Sprintf("预览：选中 %d 个分区 / %d 个条目（明细列在下面，未做任何改动）",
 		len(chosen), len(rows)))
-	a.log("预览未做任何改动。要真删请点【永久删除】并在弹窗里确认。")
+	a.log("预览未做任何改动。要真删请点【⚠ 永久删除】，再在弹窗里点【确认永久删除】。")
 }
 
 // deleteSummary 复刻命令行 delete 的选中统计（表头/口径一致）。
@@ -983,6 +1403,46 @@ func (a *app) deleteSummary(chosen []*parts.Part) string {
 	fmt.Fprintf(&b, "\n本次将永久删除 %d 个条目，约 %s（不可恢复）", count,
 		tty.Human(float64(engine.TotalSize(chosen))))
 	return b.String()
+}
+
+// confirmPermanent 是第二层闸门：把规模、编号、快照路径和「不可恢复」一次列清，
+// 点【确认永久删除】才动手（不再要求手打确认词）。不用 walk.MsgBox 是因为它只有「是/否」
+// 两个等价的按钮，看不出哪一个是危险的；这里警示行用红字、规模用粗体，且不设默认按钮，
+// 回车什么都不做，只有点按钮这条路。
+func (a *app) confirmPermanent(partCount, itemCount int, size int64, ids []int, prefix string) bool {
+	var dlg *walk.Dialog
+	scale := fmt.Sprintf("%d 个分区 / %d 个条目，约 %s", partCount, itemCount, tty.Human(float64(size)))
+	numbered := "选中编号：" + briefIDs(ids, 20)
+	if prefix != "" {
+		numbered += fmt.Sprintf("（再按前缀 %q* 收窄）", prefix)
+	}
+	err := Dialog{
+		AssignTo:  &dlg,
+		Title:     "永久删除确认（不可恢复）",
+		FixedSize: true,
+		MinSize:   Size{Width: 520},
+		Layout:    VBox{},
+		Children: []Widget{
+			TextLabel{Text: "⚠ 即将永久删除", TextColor: walk.RGB(192, 0, 0)},
+			TextLabel{Text: scale, Font: Font{Bold: true}},
+			TextLabel{Text: numbered},
+			TextLabel{Text: "这些内容直接从 $Recycle.Bin 抹掉，不进回收站、无法恢复。", TextColor: walk.RGB(192, 0, 0)},
+			TextLabel{Text: "快照：" + store.Path(a.dir())},
+			TextLabel{Text: "逐笔记入同目录的 ledger.csv，删完能核对。"},
+			Composite{Layout: HBox{}, Children: []Widget{
+				TextLabel{Text: "没核对清单的话先【取消】，回④/⑤看明细。"},
+				HSpacer{},
+				PushButton{Text: "取消", MaxSize: Size{Width: 88}, OnClicked: func() { dlg.Cancel() }},
+				PushButton{Text: "确认永久删除", MaxSize: Size{Width: 120}, OnClicked: func() { dlg.Accept() }},
+			}},
+		},
+	}.Create(a.mw)
+	if err != nil {
+		a.failf("确认窗口创建失败: %v", err)
+		return false
+	}
+	defer dlg.Dispose()
+	return dlg.Run() == walk.DlgCmdOK
 }
 
 // deleteSelected 走第二层（弹窗确认，等价 --yes）和第三层（保险丝，等价 --max）。
@@ -1014,25 +1474,13 @@ func (a *app) deleteSelected() {
 		count += p.Count
 	}
 	size := engine.TotalSize(chosen)
-	msg := fmt.Sprintf("将永久删除 %d 个条目，约 %s。\n\n"+
-		"这些内容直接从 $Recycle.Bin 抹掉，不进回收站、无法恢复。\n"+
-		"选中分区编号：%s%s\n快照：%s\n\n建议先点【预览删除】核对清单。现在确定要删吗？",
-		count, tty.Human(float64(size)), strings.Join(intsToStrings(ids), ","),
-		func() string {
-			if prefix == "" {
-				return ""
-			}
-			return "（前缀 " + prefix + "*）"
-		}(),
-		store.Path(a.dir()))
-	if walk.MsgBox(a.mw, "永久删除确认", msg,
-		walk.MsgBoxYesNo|walk.MsgBoxIconWarning|walk.MsgBoxDefButton2) != win.IDYES {
+	if !a.confirmPermanent(len(chosen), count, size, ids, prefix) {
 		a.log("已取消，未做任何改动。")
 		return
 	}
 
 	dir := a.dir()
-	a.log(fmt.Sprintf("开始删除 %d 个条目…（每 %d 个刷一次进度）", count, progressEvery))
+	a.logf("开始删除 %d 个条目…（每 %d 个刷一次进度）", count, progressEvery)
 	a.beginBusy("删除中…")
 	a.progress.SetRange(0, count)
 	st := a.st
@@ -1044,6 +1492,7 @@ func (a *app) deleteSelected() {
 						return
 					}
 					a.progress.SetValue(n)
+					a.progressLabel.SetText(fmt.Sprintf("进度 删除中 %d/%d（成功 %d，失败 %d）", n, total, done, failed))
 					a.sbHint.SetText(fmt.Sprintf("删除中 %d/%d  已删 %d  失败 %d", n, total, done, failed))
 				})
 			})
@@ -1053,34 +1502,39 @@ func (a *app) deleteSelected() {
 
 func (a *app) finishDelete(rep *engine.Report, err error, dir string) {
 	a.endBusy()
-	a.progress.SetValue(a.progress.MaxValue())
 	if err != nil && rep == nil {
 		// 保险丝拦下或账本打不开：一条都没动。
-		a.log(err.Error())
-		a.log("未做任何改动。")
+		a.warn(err.Error())
+		a.warn("未做任何改动。")
 		return
 	}
 	if err != nil {
-		a.logf("删除中断: %v", err)
+		a.failf("删除中断: %v", err)
 	}
 	if rep != nil {
-		a.log(fmt.Sprintf("\n完成：删除 %d 个，失败 %d 个，账本 %s",
-			rep.Done, rep.Failed, filepath.Join(dir, store.LedgerName)))
+		a.progressLabel.SetText(fmt.Sprintf("进度 删除结束：成功 %d，失败 %d", rep.Done, rep.Failed))
+		if rep.Failed == 0 {
+			a.okf("删除完成：成功 %d 个，失败 %d 个，账本 %s",
+				rep.Done, rep.Failed, filepath.Join(dir, store.LedgerName))
+		} else {
+			a.warnf("删除结束：成功 %d 个，失败 %d 个，账本 %s",
+				rep.Done, rep.Failed, filepath.Join(dir, store.LedgerName))
+		}
 		for i, line := range rep.Errors {
 			if i == 20 {
-				a.logf("  ! …另有 %d 条失败记录，见账本", len(rep.Errors)-i)
+				a.warnf("…另有 %d 条失败记录，见账本", len(rep.Errors)-i)
 				break
 			}
-			a.log("  ! " + line)
+			a.warn(line)
 		}
 	}
 	a.log(fmt.Sprintf("快照已更新（%s）：标记了本次删掉的条目，编号不变。", store.Path(dir)))
 	a.log("要看回收站最新状态请重新扫描：编号按当前内容重建。")
 	if a.st != nil {
-		a.sbSnapshot.SetText(fmt.Sprintf("快照 %s｜未删完 %d｜最近删除 %s",
+		a.sbSnapshot.SetText(fmt.Sprintf("快照 %s｜未删完条目 %d｜最近删除 %s",
 			a.st.Created, a.st.AliveLeft(), a.st.LastDelete))
 	}
-	a.refreshParts()
+	a.refreshParts(false)
 }
 
 func (a *app) applyIDs() {
@@ -1126,19 +1580,51 @@ func (a *app) applyIDs() {
 	a.logf("已勾选 %d 个分区。", len(checked))
 }
 
-func (a *app) clearChecked() {
-	a.partModel.checked = map[int]bool{}
-	a.partModel.anchor = -1
+// selectAll 是【全选】：勾上当前视图里所有还有未删条目的分区。
+// 已删完的跳过 —— 它们的 $R/$I 已经不在了，勾上只会让引擎逐条报「找不到文件」。
+func (a *app) selectAll() {
+	if a.st == nil {
+		a.log("还没有快照，先点【扫描 / 重扫】。")
+		return
+	}
+	if a.partModel.RowCount() == 0 {
+		a.log("当前视图是空的（多半是「只看未删完」把分区都筛掉了，或还没扫描），没有可全选的分区。")
+		return
+	}
+	selected, skipped := a.partModel.selectAlive()
 	a.partModel.refresh()
 	a.updateSelectionHint()
+	if selected == 0 {
+		a.logf("视图里 %d 行全都已经删完了，一个也没勾（要清掉这些空分区，重新扫描即可让它们消失）。", skipped)
+		return
+	}
+	if skipped > 0 {
+		a.warnf("已勾选当前视图的 %d 个分区；另外 %d 个已经没有未删条目，跳过了。", selected, skipped)
+		return
+	}
+	a.okf("已勾选当前视图的 %d 个分区。", selected)
 }
 
-// updateSelectionHint 同时刷两处：左表上方的概览行（也是和明细表标题配对的等高一行）
-// 和状态栏的勾选统计。
+func (a *app) clearChecked() {
+	n := a.partModel.clearChecks()
+	a.partModel.refresh()
+	a.updateSelectionHint()
+	if n > 0 {
+		a.logf("已清空勾选（原先勾着 %d 个分区）。", n)
+	}
+}
+
+// updateSelectionHint 把「此刻有多少东西」和「勾了要删多少」一次刷齐四处：
+// ② 的四个总体数字、⑥ 的删除按钮文案、④ 的概览行、状态栏右侧。
 func (a *app) updateSelectionHint() {
 	if a.st == nil {
 		a.sbHint.SetText("F5 扫描；勾选分区后先预览再删除")
 		a.partsHint.SetText("（还没有快照：点【扫描 / 重扫】）")
+		a.sumParts.SetText("—")
+		a.sumItems.SetText("—")
+		a.sumAlive.SetText("—")
+		a.sumChecked.SetText("未勾选")
+		a.deleteBtn.SetText(deleteButtonText(0, 0))
 		return
 	}
 	ids, chosen, _ := a.checkedSelection()
@@ -1148,11 +1634,22 @@ func (a *app) updateSelectionHint() {
 		count += p.Count
 		size += p.Size
 	}
-	a.partsHint.SetText(fmt.Sprintf("当前视图 %d 行｜快照共 %d 个分区（编号 1..%d）｜未删完 %d 个｜勾选 %d 个 / %d 个条目 %s",
-		a.partModel.RowCount(), len(a.st.Parts), len(a.st.Parts), a.st.AliveLeft(),
-		len(chosen), count, tty.Human(float64(size))))
+	aliveParts := 0
+	for _, p := range a.st.Parts {
+		if p.Deleted < p.Count {
+			aliveParts++
+		}
+	}
+	a.sumParts.SetText(fmt.Sprintf("%d 个（编号 1..%d）", len(a.st.Parts), len(a.st.Parts)))
+	a.sumItems.SetText(fmt.Sprintf("%d 个 / %s", len(a.st.Items), tty.Human(float64(totalSize(a.st)))))
+	a.sumAlive.SetText(fmt.Sprintf("%d 个条目 / %d 个分区", a.st.AliveLeft(), aliveParts))
+	a.sumChecked.SetText(fmt.Sprintf("%d 个分区 / %d 个条目", len(chosen), count))
+	a.deleteBtn.SetText(deleteButtonText(len(chosen), count))
+	a.partsHint.SetText(fmt.Sprintf("当前视图 %d 行｜快照共 %d 个分区（编号 1..%d）｜未删完条目 %d 个（在 %d 个分区里）｜勾选 %d 个分区 / %d 个条目 %s",
+		a.partModel.RowCount(), len(a.st.Parts), len(a.st.Parts),
+		a.st.AliveLeft(), aliveParts, len(chosen), count, tty.Human(float64(size))))
 	if len(ids) == 0 {
-		a.sbHint.SetText(fmt.Sprintf("未勾选分区｜未删完 %d 个", a.st.AliveLeft()))
+		a.sbHint.SetText(fmt.Sprintf("未勾选分区｜未删完条目 %d 个", a.st.AliveLeft()))
 		return
 	}
 	a.sbHint.SetText(fmt.Sprintf("已勾选 %d 个编号 / %d 个分区 / %d 个条目 %s",
