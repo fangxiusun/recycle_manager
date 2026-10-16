@@ -84,6 +84,7 @@ jobs:
           cache: true
 
       - name: 定版本号（推 v* tag 用它，手动触发用 dev-短 sha，只进 Artifacts）
+        id: ver
         run: |
           set -euo pipefail
           if [ "${GITHUB_EVENT_NAME}" = "push" ] && [[ "${GITHUB_REF_NAME}" == v* ]]; then
@@ -92,6 +93,9 @@ jobs:
             ver="dev-${GITHUB_SHA::7}"
           fi
           echo "VER=${ver}" >> "$GITHUB_ENV"
+          # 产物名是 `with:` 里的表达式，走 step output 才保险：文档只保证 env 上下文里放的是
+          # workflow/job/step 的 `env:` 键，$GITHUB_ENV 写进去的变量归到哪个上下文没写死。
+          echo "VER=${ver}" >> "$GITHUB_OUTPUT"
           echo "版本号：${ver}"
 
       - name: 装 windres（binutils-mingw-w64-x86-64，noble 上它提供 /usr/bin/x86_64-w64-mingw32-windres）
@@ -171,8 +175,8 @@ jobs:
               '',
               f'构建环境：Go {os.environ.get("GO_VERSION", "?")}（CGO_ENABLED=0, GOTOOLCHAIN=local）、'
               f'`-trimpath`、commit `{os.environ.get("GITHUB_SHA", "")[:7]}`、'
-              'windres 由 Ubuntu 的 mingw-w64 提供（本机产物是 Windows binutils 的 windres，'
-              '两边只按上面这张表的字段对齐，不承诺逐字节相同）。',
+              'windres 来自 Ubuntu 的 binutils-mingw-w64-x86-64（本机产物是 Windows binutils 的 '
+              'windres，两边只按上面这张表的字段对齐，不承诺逐字节相同）。',
               '',
               '> CI 只做到字节层校验（Subsystem / PE32+ / manifest 已嵌入），'
               'Linux runner 跑不了 PE，「双击真能开界面」这一步还需要人工点一次。',
@@ -194,10 +198,10 @@ jobs:
 
       - uses: actions/upload-artifact@v7
         with:
-          name: rbm-${{ env.VER }}-windows-amd64
+          name: rbm-${{ steps.ver.outputs.VER }}-windows-amd64
           path: |
-            rbm-${{ env.VER }}-windows-amd64.zip
-            rbm-${{ env.VER }}-sha256.txt
+            rbm-${{ steps.ver.outputs.VER }}-windows-amd64.zip
+            rbm-${{ steps.ver.outputs.VER }}-sha256.txt
 
       - name: 发布 GitHub Release（只在推 v* tag 时）
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
