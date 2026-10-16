@@ -1,0 +1,35 @@
+# rbm_go：Go 版回收站分批管理（walk 图形界面 + 命令行，共用 internal/engine 内核）
+
+# ---- 运行产物：快照 / 明细清单 / 删除账本 ----
+# 默认写在程序当前目录的 .rbm\，内容是本机回收站的真实条目与已删记录，不进版本库。
+# 尤其注意：GUI 一打开就自动扫描，会把 state.json 和 scan_list.csv 覆写成此刻的回收站。
+# 用 --state-dir / 【快照目录】指到别处时，那三个文件名同样别提交。
+.rbm/
+state.json
+scan_list.csv
+ledger.csv
+
+# ---- Go 构建产物 ----
+# rsrc.syso 是 windres 从 rbm.rc + rbm.manifest 生成的（README §2 第 1 步）；
+# rbm.rc 与 rbm.manifest 是源文件，必须提交，少了 manifest 一开界面就 TTM_ADDTOOL failed。
+*.exe
+*.syso
+*.obj
+*.test
+*.out
+coverage.out
+coverage.html
+
+# ---- testdata 的黄金样例：不忽略 ----
+# internal/{meta,parts,store}/testdata/ 下的 py_*.json 是与 Python 版逐字段比对的依据，
+# 只由同目录的 regen_py_*.py 再生成。上面的 *.json 类规则一律没写，别误伤它们。
+
+# ---- 跑再生成脚本会留下的 Python 缓存 ----
+__pycache__/
+*.py[cod]
+
+# ---- 编辑器与系统 ----
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini

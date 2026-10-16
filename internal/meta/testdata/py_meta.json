@@ -1,0 +1,133 @@
+{
+ "local_utc_offset_now": 28800,
+ "cases": [
+  {
+   "stem": "100001winter",
+   "meta_version": 2,
+   "size": 1024,
+   "deleted_at": "2026-01-05 08:30:00",
+   "epoch": 1767573000.0,
+   "orig_path": "Z:\\work\\build1\\out\\chunk-46.js",
+   "display": "chunk-46.js",
+   "unrecoverable": false
+  },
+  {
+   "stem": "100002summer",
+   "meta_version": 2,
+   "size": 98765,
+   "deleted_at": "2026-07-01 23:59:59",
+   "epoch": 1782921599.0,
+   "orig_path": "Z:\\work\\build1\\out\\vite.config.mjs",
+   "display": "vite.config.mjs",
+   "unrecoverable": false
+  },
+  {
+   "stem": "100003cjk",
+   "meta_version": 2,
+   "size": 4096,
+   "deleted_at": "2026-10-15 12:11:14",
+   "epoch": 1792037474.0,
+   "orig_path": "G:\\笔记\\草稿 与 一段很长的中文目录名\\笔记-草稿.md",
+   "display": "笔记-草稿.md",
+   "unrecoverable": false
+  },
+  {
+   "stem": "100004lower",
+   "meta_version": 2,
+   "size": 7,
+   "deleted_at": "1970-01-02 08:00:00",
+   "epoch": 86400.0,
+   "orig_path": "Z:\\work\\zero.bin",
+   "display": "zero.bin",
+   "unrecoverable": false
+  },
+  {
+   "stem": "100005y2038",
+   "meta_version": 2,
+   "size": 1073741824,
+   "deleted_at": "2038-01-19 11:14:08",
+   "epoch": 2147483648.0,
+   "orig_path": "Z:\\work\\far_future.bin",
+   "display": "far_future.bin",
+   "unrecoverable": false
+  },
+  {
+   "stem": "100007fraction",
+   "meta_version": 2,
+   "size": 1,
+   "deleted_at": "2026-03-01 00:00:01",
+   "epoch": 1772294401.0,
+   "orig_path": "Z:\\work\\half.bin",
+   "display": "half.bin",
+   "unrecoverable": false
+  },
+  {
+   "stem": "100008trailing",
+   "meta_version": 2,
+   "size": 0,
+   "deleted_at": "2026-05-20 10:00:00",
+   "epoch": 1779242400.0,
+   "orig_path": "C:\\Users\\x\\Temp\\Vs9POM\\sub\\",
+   "display": "sub",
+   "unrecoverable": false
+  },
+  {
+   "stem": "100009guid",
+   "meta_version": 2,
+   "size": 12,
+   "deleted_at": "2026-02-02 02:02:02",
+   "epoch": 1769968922.0,
+   "orig_path": "::{6D809000-9578-4E4D-A416-0803501EA482}",
+   "display": "{6D809000-9578-4E4D-A416-0803501EA482}",
+   "unrecoverable": true
+  },
+  {
+   "stem": "100010negsize",
+   "meta_version": 2,
+   "size": 0,
+   "deleted_at": "2026-04-04 04:04:04",
+   "epoch": 1775246644.0,
+   "orig_path": "Z:\\work\\negative.bin",
+   "display": "negative.bin",
+   "unrecoverable": false
+  },
+  {
+   "stem": "100011v1",
+   "meta_version": 1,
+   "size": 55,
+   "deleted_at": "2025-11-11 11:11:11",
+   "epoch": 1762830671.0,
+   "orig_path": "Z:\\work\\legacy.bin",
+   "display": "legacy.bin",
+   "unrecoverable": false
+  },
+  {
+   "stem": "100012drive",
+   "meta_version": 2,
+   "size": 3,
+   "deleted_at": "2026-09-09 09:09:09",
+   "epoch": 1788916149.0,
+   "orig_path": "D:\\",
+   "display": "100012drive",
+   "unrecoverable": false
+  }
+ ],
+ "error_cases": [
+  {
+   "stem": "200001ft0",
+   "py_error": "OSError"
+  },
+  {
+   "stem": "200002pre1970",
+   "py_error": "OSError"
+  },
+  {
+   "stem": "200003y1970",
+   "py_error": "OSError"
+  },
+  {
+   "stem": "200004y3001",
+   "py_error": "OSError"
+  }
+ ]
+}
