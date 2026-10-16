@@ -535,8 +535,8 @@ func Run() int {
 		fmt.Fprintln(os.Stderr, "图形界面创建失败:", err)
 		return 1
 	}
-	// 双击打开的是控制台子系统的 exe，系统会先给一个黑窗口；界面已经建好了，
-	// 这里把控制台甩掉，之后的日志只走窗口里的日志区。命令行分支不经过这里。
+	// 这份 rbm.exe 是控制台子系统，系统先给它建了黑窗口；界面已经建好，这里把控制台甩掉，
+	// 日志之后只走窗口里的日志区。命令行分支不经过这里；要黑框从头不出现就用 rbm-gui.exe。
 	procFreeConsole.Call()
 	a.mw.Run()
 	return 0
@@ -726,7 +726,10 @@ func (a *app) resultBox() Widget {
 		Layout: VBox{},
 		Children: []Widget{
 			Composite{Layout: HBox{}, Children: []Widget{
-				PushButton{AssignTo: &a.scanBtn, Text: "扫描 / 重扫 (F5)", MaxSize: Size{Width: 150},
+				// Min 与 Max 同值才叫锁宽：layout.go 的 minSizeEffective 先取 max(文字理想宽度, MinSize)
+				// 再按 MaxSize 收，只写 MaxSize 时按钮只拿到文字宽度，两侧就没有留白。
+				PushButton{AssignTo: &a.scanBtn, Text: "扫描 / 重扫 (F5)",
+					MinSize: Size{Width: 120}, MaxSize: Size{Width: 120},
 					OnClicked: func() { a.startScan() }},
 				HSpacer{},
 			}},
@@ -775,10 +778,12 @@ func (a *app) deleteBox() Widget {
 		Title:  "⑥ 删除操作（三层闸门：预览 → 弹窗确认 → 保险丝）",
 		Layout: HBox{},
 		Children: []Widget{
-			PushButton{AssignTo: &a.previewBtn, Text: "预览删除（不动文件）", MaxSize: Size{Width: 190},
+			PushButton{AssignTo: &a.previewBtn, Text: "预览删除（不动文件）",
+				MinSize: Size{Width: 165}, MaxSize: Size{Width: 165},
 				ToolTipText: "只把选中统计和明细打进日志/右表，等价 rbm delete <编号> --dry-run",
 				OnClicked:   func() { a.previewDelete() }},
-			PushButton{AssignTo: &a.deleteBtn, Text: deleteButtonText(0, 0), MaxSize: Size{Width: 280},
+			PushButton{AssignTo: &a.deleteBtn, Text: deleteButtonText(0, 0),
+				MinSize: Size{Width: 240}, MaxSize: Size{Width: 280},
 				ToolTipText: "真删：不进回收站、不可恢复。要在弹窗里点【确认永久删除】，并受「删除保险丝」约束。",
 				OnClicked:   func() { a.deleteSelected() }},
 			ProgressBar{AssignTo: &a.progress, MinValue: 0, MaxValue: 100, StretchFactor: 1,
@@ -908,6 +913,10 @@ func (a *app) emit(kind int, text string) {
 		}
 	}
 	a.logBox.AppendText(b.String() + "\r\n")
+	// walk 的 AppendText 追加完会把选区还原成追加前的位置（textedit.go:240-245），光标不在末尾，
+	// 所以要先自己把光标挪到最后一条再滚过去，否则每次都滚回顶部。
+	n := a.logBox.TextLength()
+	a.logBox.SetTextSelection(n, n)
 	a.logBox.ScrollToCaret()
 	a.logLines += len(lines)
 	a.logCount.SetText(fmt.Sprintf("%d 行", a.logLines))
@@ -1679,8 +1688,48 @@ func (a *app) openStateDir() {
 	a.logf("已在资源管理器里打开: %s", dir)
 }
 
+// showUsage 把说明装进一个可缩放、文字可框选的只读文本框。原来用 MsgBox：usageText 有 35 行
+// （gui.go:107-141），弹窗既拉不高也没法整段复制。【关闭】挂成 CancelButton，所以 Esc 也关得掉。
 func (a *app) showUsage() {
-	walk.MsgBox(a.mw, "rbm 使用说明", usageText, walk.MsgBoxOK|walk.MsgBoxIconInformation)
+	var dlg *walk.Dialog
+	var closeBtn *walk.PushButton
+	// 编辑控件只认 CRLF，先把源码里的 \n 统一一遍（同 emit 的处理）。
+	body := strings.ReplaceAll(strings.ReplaceAll(usageText, "\r\n", "\n"), "\n", "\r\n")
+	err := Dialog{
+		AssignTo:     &dlg,
+		CancelButton: &closeBtn,
+		Title:        "rbm 使用说明",
+		// 有布局的 Dialog 在 Show 时把窗口尺寸改成 max(内容最小尺寸, MinSize)（walk dialog.go:165-188），
+		// 声明里的 Size 会被丢掉，所以初始大小只能写在 MinSize 上；拖边框放大照旧。
+		MinSize: Size{Width: 760, Height: 520},
+		Layout:  VBox{},
+		Children: []Widget{
+			TextEdit{
+				ReadOnly: true, VScroll: true, HScroll: true, StretchFactor: 1,
+				Font: Font{Family: "Consolas", PointSize: 9},
+				Text: body,
+			},
+			Composite{Layout: HBox{}, Children: []Widget{
+				TextLabel{Text: "可以拖窗口边框放大，文字按住左键框选后 Ctrl+C 复制"},
+				HSpacer{},
+				PushButton{AssignTo: &closeBtn, Text: "关闭", MinSize: Size{Width: 88}, MaxSize: Size{Width: 88},
+					OnClicked: func() { dlg.Cancel() }},
+			}},
+		},
+	}.Create(a.mw)
+	if err != nil {
+		a.failf("使用说明窗口创建失败: %v", err)
+		return
+	}
+	defer dlg.Dispose()
+	// 焦点要在 Show 之前自己定好：walk 首次布局后会走 focusFirstCandidateDescendant
+	// （container.go:448-465），给第一个 tab 停靠控件设焦点，紧接着延迟 1ms 调
+	// SetTextSelection(0, -1)，于是整篇说明一打开就处于「全选高亮」状态。layout.go:325-333
+	// 那段只在「焦点不在本对话框内」时才动手，所以这里先把焦点交给【关闭】：打开时没有选中，
+	// Esc/空格照旧关窗，要复制就点进文字区框选再 Ctrl+C（实测把焦点给文本框反而会让第一次
+	// 点击拖出一大段选中，故不这么做）。
+	closeBtn.SetFocus()
+	dlg.Run()
 }
 
 func (a *app) showAbout() {
