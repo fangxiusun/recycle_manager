@@ -1,0 +1,32 @@
+# 换行符口径。GitHub 的 Windows runner 会把 core.autocrlf 设成 true，没写归一化规则时
+# checkout 出来的 .go 全是 CRLF，`gofmt -l internal/` 于是把每个文件都报出来（2026-10-16
+# release.yml 第一次跑就是这样失败的：16 个 internal/*.go 全中，代码本身没问题）。
+# 显式声明后，落地字节只由这份文件决定，和 runner/本机怎么配 autocrlf 无关。
+#
+# 仓库里所有文本 blob 本来就是 LF（git ls-files --eol 全是 i/lf），所以这些规则不会改写索引，
+# 只固定检出结果。
+
+# 源码与文本：检出也用 LF
+*.go         text eol=lf
+*.mod        text eol=lf
+*.sum        text eol=lf
+*.md         text eol=lf
+*.yml        text eol=lf
+*.yaml       text eol=lf
+*.json       text eol=lf
+*.py         text eol=lf
+*.rc         text eol=lf
+*.manifest   text eol=lf
+.gitignore   text eol=lf
+.gitattributes text eol=lf
+
+# cmd 在代码页 936 下会把 UTF-8 注释和纯 LF 读错，这两类脚本必须保持 CRLF
+*.bat  text eol=crlf
+*.ps1  text eol=crlf
+
+# 二进制：$I 索引样本内部就有 \r 字节（internal/meta/testdata/isample/$I100003cjk），
+# 一旦被归一化，元数据解析的用例会全乱。
+internal/meta/testdata/isample/*  -text
+*.syso  -text
+*.exe   -text
+*.zip   -text

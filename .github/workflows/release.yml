@@ -51,6 +51,9 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache: true
 
+      # 这一步能信的前提是根目录 .gitattributes：Windows runner 把 core.autocrlf 设成 true，
+      # 没有归一化规则时 checkout 出来的 .go 全带 CRLF，gofmt 会把 16 个文件一并报出来
+      # （2026-10-16 首次跑就是这样红的，代码本身没格式问题）。
       - name: gofmt 不留脏文件
         shell: pwsh
         run: |
