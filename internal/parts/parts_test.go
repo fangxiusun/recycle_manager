@@ -66,6 +66,21 @@ type fixture struct {
 // 同一份条目、同一套参数，Go 的分区结果必须逐字段一致（含编号顺序与重排后的条目数）。
 // 样例由 testdata/regen_py_fixture.py 生成，只含合成数据。
 func TestMatchesPythonFixture(t *testing.T) {
+	checkAllConfigs(t, loadPartsFixture(t), true)
+}
+
+// TestFixtureComparisonIgnoresMachineZone 把机器时区换成 UTC（GitHub 的 windows-latest 就是
+// UTC 主机）再比一遍：样例的日期串是快照机器（UTC+8）打出来的，跟着 runner 的时区走 49 组里
+// 有 48 组会差一天，2026-10-17 那次 CI 就是这样红的，所以这里必须全绿。
+func TestFixtureComparisonIgnoresMachineZone(t *testing.T) {
+	old := meta.LocalTZ
+	meta.LocalTZ = time.UTC
+	t.Cleanup(func() { meta.LocalTZ = old })
+	checkAllConfigs(t, loadPartsFixture(t), false)
+}
+
+func loadPartsFixture(t *testing.T) fixture {
+	t.Helper()
 	raw, err := os.ReadFile(filepath.Join("testdata", "py_parts.json"))
 	if err != nil {
 		t.Fatalf("读 fixture 失败: %v", err)
@@ -77,11 +92,43 @@ func TestMatchesPythonFixture(t *testing.T) {
 	if len(fx.Sets) == 0 {
 		t.Fatal("fixture 是空的")
 	}
+	return fx
+}
+
+// fixtureZone 从样例自带的 (epoch, deleted_at) 反推「打快照那台机器」的 UTC 偏移：
+// deleted_at 是本地墙钟串，墙钟当 UTC 读再减去 epoch 就是当时的偏移（当前这份 1400 条
+// 全部指向 +28800）。比对必须钉在这个区里跑：桶边界按本地时刻取整
+// （parts.go:131-156 的 floorDay/floorMonth/nextMonth），换台机器就整体位移一天。
+func fixtureZone(t *testing.T, fx fixture) *time.Location {
+	t.Helper()
+	for _, set := range fx.Sets {
+		for _, it := range set.Items {
+			if it == nil || it.DeletedAt == "" {
+				continue
+			}
+			wall, err := time.Parse("2006-01-02 15:04:05", it.DeletedAt)
+			if err != nil {
+				t.Fatalf("样例里的 deleted_at %q 读不了: %v", it.DeletedAt, err)
+			}
+			// 墙钟串截掉了小数秒，wall-epoch 落在 (offset-1, offset]，取上整才等于 offset。
+			return time.FixedZone("fixture", int(math.Ceil(float64(wall.Unix())-it.Epoch)))
+		}
+	}
+	t.Fatal("样例里没有带 deleted_at 的条目，定不了时区")
+	return nil
+}
+
+// checkAllConfigs 逐字段比对样例里全部 (set, cfg) 组合，subtests 为真时每组挂一个子用例名。
+func checkAllConfigs(t *testing.T, fx fixture, subtests bool) {
+	t.Helper()
+	old := meta.LocalTZ
+	meta.LocalTZ = fixtureZone(t, fx)
+	t.Cleanup(func() { meta.LocalTZ = old })
+
 	total := 0
 	for si, set := range fx.Sets {
 		for ci, fc := range set.Configs {
-			name := fmt.Sprintf("set%d_cfg%d_%s_%s", si, ci, fc.Cfg.By, bucketText(fc.Cfg.Bucket))
-			t.Run(name, func(t *testing.T) {
+			check := func(t *testing.T) {
 				bounds, got, ordered, err := BuildPartitions(set.Items, derefBucket(fc.Cfg.Bucket),
 					fc.Cfg.MaxBuckets, fc.Cfg.By, fc.Cfg.PrefixLen, fc.Cfg.MaxParts,
 					fc.Cfg.MinCount, fc.Cfg.DirLevel)
@@ -102,7 +149,12 @@ func TestMatchesPythonFixture(t *testing.T) {
 						t.Errorf("分区 %d 不符: %s", i+1, diff)
 					}
 				}
-			})
+			}
+			if subtests {
+				t.Run(fmt.Sprintf("set%d_cfg%d_%s_%s", si, ci, fc.Cfg.By, bucketText(fc.Cfg.Bucket)), check)
+			} else {
+				check(t)
+			}
 			total++
 		}
 	}

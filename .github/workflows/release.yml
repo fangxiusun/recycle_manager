@@ -8,9 +8,9 @@
 #   - 自检必须在 Windows 上跑——`internal/gui` 依赖 lxn/walk 与 golang.org/x/sys/windows，
 #     两者的文件都带 `//go:build windows`，换到 Linux 主机上连编译都过不去，更别说跑测试。
 #   - 交叉编译放在 Linux 上——`CGO_ENABLED=0` 的 Go 本来就支持 GOOS=windows，唯一要 C 工具链
-#     的是资源文件：`rsrc.syso` 得靠 windres 把 rbm.rc + rbm.manifest 编出来，而 Ubuntu 的
-#     mingw-w64 里就有 `x86_64-w64-mingw32-windres`，装一个 apt 包搞定，Windows runner 上反而
-#     没有现成的 windres。
+#     的是资源文件：`rsrc.syso` 得靠 windres 把 rbm.rc + rbm.manifest 编出来，而 Ubuntu 24.04
+#     （现在的 ubuntu-latest）的 `binutils-mingw-w64-x86-64` 就提供 `/usr/bin/x86_64-w64-mingw32-windres`，
+#     装一个 apt 包搞定，Windows runner 上反而没有现成的 windres。
 #
 # CI 只做到字节层校验（Subsystem / PE32+ / manifest 已嵌入），Linux runner 跑不了 PE，
 # 「双击真能开界面」这一步还需要人工点一次。
@@ -94,11 +94,11 @@ jobs:
           echo "VER=${ver}" >> "$GITHUB_ENV"
           echo "版本号：${ver}"
 
-      - name: 装 windres（mingw-w64 的 binutils）
+      - name: 装 windres（binutils-mingw-w64-x86-64，noble 上它提供 /usr/bin/x86_64-w64-mingw32-windres）
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends mingw-w64
+          sudo apt-get install -y --no-install-recommends binutils-mingw-w64-x86-64
           WINDRES="$(command -v x86_64-w64-mingw32-windres || command -v windres)"
           echo "WINDRES=${WINDRES}" >> "$GITHUB_ENV"
           "${WINDRES}" --version | head -2
