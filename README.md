@@ -72,28 +72,41 @@ $Recycle.Bin\<你的 SID>\$I*   →   按删除时间切桶
 
 ## 📦 下载
 
-全部版本：<https://github.com/fangxiusun/recycle_manager/releases>（徽章与上面链接都跟着最新 release 走）。
-下面这张表复核的是 **v1.0.1** 那一份资产（2026-10-17 那一轮从 GitHub 重新下载后逐字节读的），
+最新版本的下载地址：**[v1.0.2](https://github.com/fangxiusun/recycle_manager/releases/tag/v1.0.2)**；
+全部版本见 <https://github.com/fangxiusun/recycle_manager/releases>。下面这张表复核的是 **v1.0.2**
+那一份资产（2026-10-17 13:46 发布后重新下载、逐字节读 zip 成员算出来的），
 出新版本时请按[构建与验证](docs/构建与验证.md) §4 重新取一遍数字，别沿用。
 
 | 文件 | 说明 |
 |---|---|
-| `rbm-v1.0.1-windows-amd64.zip` | 免解压即用：`rbm-gui.exe`（双击开界面）、`rbm.exe`（命令行与脚本）、`README.md`。 |
-| `rbm-v1.0.1-sha256.txt` | 上述 zip 与两个 `.exe` 的 SHA-256。 |
+| `rbm-v1.0.2-windows-amd64.zip` | 解压即用：`rbm-gui.exe`（双击开界面）、`rbm.exe`（命令行与脚本）、`README.md`、`README.en.md`、`LICENSE`、`THIRD-PARTY-NOTICES.txt`。 |
+| `rbm-v1.0.2-sha256.txt` | 上述 zip 与两个 `.exe` 的 SHA-256。 |
 
 | 资产 | 字节 | SHA-256 |
 |---|---:|---|
-| `rbm-v1.0.1-windows-amd64.zip` | 9 723 847 | `6db729491ce1efd45c65edda83685a41eaa0fb4916ca2d8d0a1f1d0084282452` |
-| `rbm-v1.0.1-sha256.txt` | 257 | `dbcca8965558304a11f5f7c81f9c16d5fb039cbfdebcdb93e7ff8e7a0612e74c` |
+| `rbm-v1.0.2-windows-amd64.zip` | 9 866 736 | `baf9132c46e6dc93682aaf20355db305fe55bd610e16191df18bfb00b78a4727` |
+| `rbm-v1.0.2-sha256.txt` | 257 | `c0cc02e2576202bccd1007a0a81ba1ed421775866452445411fb7e5ba97436d4` |
+
+zip 的六个成员（同一轮逐个读出，两个 exe 各自 9 777 152 字节）：
+
+| 成员 | 字节 | PE | SHA-256 |
+|---|---:|---|---|
+| `rbm.exe` | 9 777 152 | PE32+，Subsystem **3**（控制台），manifest 命中 1 | `10ba8455c361abd9430222bff10557b6ebd430b9fb6d218e91edb22fbb66eaf7` |
+| `rbm-gui.exe` | 9 777 152 | PE32+，Subsystem **2**（GUI），manifest 命中 1 | `e225b7102c57e6032c2f37a88bbcd976ad2fc492610c15395e46fe18e5a959bb` |
+| `README.md` | 16 328 | — | `70346bdf5b6d4673cfd64cdec5b6f32788248be62d7cc08ee9543abc05ebfbca` |
+| `README.en.md` | 18 473 | — | `db2fa7addae4fe8f26496bfeca40188a4c54515dc505981da9d92308d9bccb7b` |
+| `LICENSE` | 1 073 | — | `85b95532ceba0391b252d1bf320581878cbb8576c1f1d180db0d4fde11e1a729` |
+| `THIRD-PARTY-NOTICES.txt` | 9 749 | — | `50f9879cd16d81595da3323441b5f1d0f80b478eee570e407f4a7b73f4237a89` |
 
 > [!NOTE]
-> - zip 里两个 exe 各 9 623 040 字节：`rbm.exe` 是控制台子系统（3），`rbm-gui.exe` 是 GUI 子系统（2）。
-> - `rbm-v1.0.1-sha256.txt` 里两行 exe 的名字写着 `dist/rbm.exe` / `dist/rbm-gui.exe`，而 zip 存的成员名
->   不带目录——**按哈希对齐，别按文件名**。细节见[构建与验证](docs/构建与验证.md) §4。
+> - 四个文本成员与仓库里对应文件**逐字节相同**（同一轮用 `sha256sum` 对过）。
+> - `rbm-v1.0.2-sha256.txt` 里两行 exe 的名字仍写着 `dist/rbm.exe` / `dist/rbm-gui.exe`，而 zip 存的成员名
+>   不带目录——**按哈希对齐，别按文件名**。细节见[构建与验证](docs/构建与验证.md) §3.7、§4。
 > - 程序尚未做代码签名，首次运行 Windows SmartScreen 可能提示「未知发布者」。
+> - 上一版 v1.0.1 的 zip 只有三个成员（`rbm.exe`、`rbm-gui.exe`、`README.md`），许可文本从 v1.0.2 起才带上。
 
 ```powershell
-Get-FileHash .\rbm-v1.0.1-windows-amd64.zip -Algorithm SHA256   # 应与上表第一行一致
+Get-FileHash .\rbm-v1.0.2-windows-amd64.zip -Algorithm SHA256   # 应与上表第一行一致
 ```
 
 ## 💻 系统要求

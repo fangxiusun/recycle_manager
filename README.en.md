@@ -79,32 +79,45 @@ operations instead of one unbreakable multi-hour block.
 
 ## 📦 Download
 
-All releases: <https://github.com/fangxiusun/recycle_manager/releases> (the badge and this link both
-track the latest release). The table below documents **v1.0.1**, read byte-for-byte off a fresh
-download in the 2026-10-17 round — when a new version ships, re-measure it per
+Latest release: **[v1.0.2](https://github.com/fangxiusun/recycle_manager/releases/tag/v1.0.2)**;
+all releases: <https://github.com/fangxiusun/recycle_manager/releases>. The tables below document
+**v1.0.2**, read byte-for-byte off a fresh download right after it was published
+(2026-10-17 13:46 local) — when a new version ships, re-measure per
 [`docs/构建与验证.md`](docs/构建与验证.md) (Chinese) §4 instead of copying these numbers.
 
 | File | Notes |
 |---|---|
-| `rbm-v1.0.1-windows-amd64.zip` | unzip and run: `rbm-gui.exe` (double-click for the GUI), `rbm.exe` (CLI and scripts), `README.md`. |
-| `rbm-v1.0.1-sha256.txt` | SHA-256 for the zip and for both `.exe` files. |
+| `rbm-v1.0.2-windows-amd64.zip` | unzip and run: `rbm-gui.exe` (double-click for the GUI), `rbm.exe` (CLI and scripts), `README.md`, `README.en.md`, `LICENSE`, `THIRD-PARTY-NOTICES.txt`. |
+| `rbm-v1.0.2-sha256.txt` | SHA-256 for the zip and for both `.exe` files. |
 
 | Asset | Bytes | SHA-256 |
 |---|---:|---|
-| `rbm-v1.0.1-windows-amd64.zip` | 9 723 847 | `6db729491ce1efd45c65edda83685a41eaa0fb4916ca2d8d0a1f1d0084282452` |
-| `rbm-v1.0.1-sha256.txt` | 257 | `dbcca8965558304a11f5f7c81f9c16d5fb039cbfdebcdb93e7ff8e7a0612e74c` |
+| `rbm-v1.0.2-windows-amd64.zip` | 9 866 736 | `baf9132c46e6dc93682aaf20355db305fe55bd610e16191df18bfb00b78a4727` |
+| `rbm-v1.0.2-sha256.txt` | 257 | `c0cc02e2576202bccd1007a0a81ba1ed421775866452445411fb7e5ba97436d4` |
+
+The six members of the zip (same round; both executables are 9 777 152 bytes):
+
+| Member | Bytes | PE | SHA-256 |
+|---|---:|---|---|
+| `rbm.exe` | 9 777 152 | PE32+, Subsystem **3** (console), 1 manifest match | `10ba8455c361abd9430222bff10557b6ebd430b9fb6d218e91edb22fbb66eaf7` |
+| `rbm-gui.exe` | 9 777 152 | PE32+, Subsystem **2** (GUI), 1 manifest match | `e225b7102c57e6032c2f37a88bbcd976ad2fc492610c15395e46fe18e5a959bb` |
+| `README.md` | 16 328 | — | `70346bdf5b6d4673cfd64cdec5b6f32788248be62d7cc08ee9543abc05ebfbca` |
+| `README.en.md` | 18 473 | — | `db2fa7addae4fe8f26496bfeca40188a4c54515dc505981da9d92308d9bccb7b` |
+| `LICENSE` | 1 073 | — | `85b95532ceba0391b252d1bf320581878cbb8576c1f1d180db0d4fde11e1a729` |
+| `THIRD-PARTY-NOTICES.txt` | 9 749 | — | `50f9879cd16d81595da3323441b5f1d0f80b478eee570e407f4a7b73f4237a89` |
 
 > [!NOTE]
-> - Both `.exe` files inside the zip are 9 623 040 bytes: `rbm.exe` is Subsystem 3 (console),
->   `rbm-gui.exe` is Subsystem 2 (GUI).
-> - The two `.exe` lines in `rbm-v1.0.1-sha256.txt` are labelled `dist/rbm.exe` / `dist/rbm-gui.exe`
->   while the zip stores bare names — **match the hashes, not the file names**. Details in
->   [`docs/构建与验证.md`](docs/构建与验证.md) (Chinese) §4.
+> - The four text members are **byte-identical** to the files in the repository (compared with
+>   `sha256sum` in the same round).
+> - The two `.exe` lines in `rbm-v1.0.2-sha256.txt` are still labelled `dist/rbm.exe` /
+>   `dist/rbm-gui.exe` while the zip stores bare names — **match the hashes, not the file names**.
+>   Details in [`docs/构建与验证.md`](docs/构建与验证.md) (Chinese) §3.7 and §4.
 > - The binaries are not code-signed, so Windows SmartScreen may warn about an unknown publisher on
 >   first run.
+> - The previous v1.0.1 zip held only three members; the licence texts ship starting with v1.0.2.
 
 ```powershell
-Get-FileHash .\rbm-v1.0.1-windows-amd64.zip -Algorithm SHA256   # should match the first table row
+Get-FileHash .\rbm-v1.0.2-windows-amd64.zip -Algorithm SHA256   # should match the first table row
 ```
 
 ## 💻 Requirements

@@ -40,14 +40,13 @@
   - [x] `docs/README.md` 索引与仓库结构树、`docs/roadmap.md`（本文件）、`docs/known-issues.md`、
         根目录 `CHANGELOG.md`
   - [x] `LICENSE`（MIT）与 `THIRD-PARTY-NOTICES.txt`（六个 Go 模块的许可证全文）
-  - [x] 发布包带上两份 README 与许可文本（`release.yml` 的打包步骤，2026-10-17 改）
+  - [x] 发布包带上两份 README 与许可文本（`release.yml` 的打包步骤，v1.0.2 起生效，六个成员已按
+        [构建与验证](构建与验证.md) §4.1 逐个复核）
 - [ ] **M7 还没做的**
-  - [ ] 真机验证下载包：双击 `rbm-v1.0.1-windows-amd64.zip` 里的 `rbm-gui.exe` 能否开界面
-        （CI 只做到字节层校验，Linux runner 跑不了 PE）
+  - [ ] 真机验证下载包：双击 `rbm-v1.0.2-windows-amd64.zip` 里的 `rbm-gui.exe` 能否开界面
+        （CI 只做到字节层校验，Linux runner 跑不了 PE；§4.1 那一轮同样只读到字节层）
   - [ ] 删除路径的真机验证：目前只在非破坏探测里验证过重绘，真删这一条链没有 A/B 记录
   - [ ] 重绘回归用例：不建窗口的测试拿不到 Win32 绘制行为，需要一个建窗口后再断言的用例或人工步骤
-  - [ ] 新的打包步骤（带 `README.en.md` / `LICENSE` / `THIRD-PARTY-NOTICES.txt`）还没真跑过一次发版，
-        zip 成员清单要在下一次发版后按[构建与验证](构建与验证.md) §3.7 复核
   - [ ] `THIRD-PARTY-NOTICES.txt` 是手工维护：需要一个「go.mod 里有但声明里没有」的检查，或干脆生成脚本 + CI
   - [ ] 程序里的「关于」窗口不显示许可证（代码里没有许可相关文案），依赖清单也只在本文件与
         `THIRD-PARTY-NOTICES.txt` 里

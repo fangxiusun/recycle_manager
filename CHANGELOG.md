@@ -5,6 +5,7 @@ rbm 各版本的用户可见变更。版本号遵循[语义化版本](https://se
 
 ## 1.0.2 - 2026-10-17
 
+构建 commit `0dac477`，发布 `2026-10-17T05:46:37Z`（流水线 run `39007408248` 绿）。
 双语、删除后的表格重绘、文档层与许可证——即 1.0.1 之后落进 `main` 的东西
 （提交 `5713308`、`8343ef1`）。
 
@@ -29,15 +30,18 @@ rbm 各版本的用户可见变更。版本号遵循[语义化版本](https://se
 
 - 补 `LICENSE`（MIT）与 `THIRD-PARTY-NOTICES.txt`（六个 Go 模块的许可证全文）。
 - 发布包的内容从 `rbm.exe`、`rbm-gui.exe`、`README.md` 扩到再附 `README.en.md`、`LICENSE`、
-  `THIRD-PARTY-NOTICES.txt`（`.github/workflows/release.yml` 的打包步骤）——**这一条从本版的 zip
-  才开始生效**，v1.0.1 那份仍是三个成员。
+  `THIRD-PARTY-NOTICES.txt`（`.github/workflows/release.yml` 的打包步骤）——本版 zip 的六个成员已按
+  [构建与验证](docs/构建与验证.md) §4.1 逐个下载复核，四个文本成员与仓库里的文件逐字节相同；
+  v1.0.1 那份仍是三个成员。
 - `.gitattributes` 给 `LICENSE` 与 `*.txt` 也钉上 LF，避免 runner 的 `core.autocrlf` 把许可文本检出成 CRLF。
 
 ### 本版仍未解决
 
-- 「双击下载包里的 `rbm-gui.exe` 真能开界面」还没有人工验证记录；删除链路也没有真机 A/B 记录。
-- 重绘这一处修复没有自动化回归用例；新的打包清单要等本版产物落地后按 §3.7 复核一次。
+- 「双击下载包里的 `rbm-gui.exe` 真能开界面」还没有人工验证记录（§4.1 只做到字节层）；
+  删除链路也没有真机 A/B 记录。
+- 重绘这一处修复没有自动化回归用例。
 - `rbm-${VER}-sha256.txt` 里两行 exe 仍带 `dist/` 前缀。
+- 仍未做代码签名，首次运行可能被 SmartScreen 拦一次。
 - 完整清单见[已知问题](docs/known-issues.md)与[路线图](docs/roadmap.md) 的 M7。
 
 ## 1.0.1 - 2026-10-16
