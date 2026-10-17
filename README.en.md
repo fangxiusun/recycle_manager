@@ -79,8 +79,10 @@ operations instead of one unbreakable multi-hour block.
 
 ## 📦 Download
 
-Latest release: **[v1.0.1](https://github.com/fangxiusun/recycle_manager/releases/tag/v1.0.1)**
-(all releases: <https://github.com/fangxiusun/recycle_manager/releases>)
+All releases: <https://github.com/fangxiusun/recycle_manager/releases> (the badge and this link both
+track the latest release). The table below documents **v1.0.1**, read byte-for-byte off a fresh
+download in the 2026-10-17 round — when a new version ships, re-measure it per
+[`docs/构建与验证.md`](docs/构建与验证.md) (Chinese) §4 instead of copying these numbers.
 
 | File | Notes |
 |---|---|

@@ -72,8 +72,9 @@ $Recycle.Bin\<你的 SID>\$I*   →   按删除时间切桶
 
 ## 📦 下载
 
-最新版本：**[v1.0.1](https://github.com/fangxiusun/recycle_manager/releases/tag/v1.0.1)**
-（全部版本：<https://github.com/fangxiusun/recycle_manager/releases>）
+全部版本：<https://github.com/fangxiusun/recycle_manager/releases>（徽章与上面链接都跟着最新 release 走）。
+下面这张表复核的是 **v1.0.1** 那一份资产（2026-10-17 那一轮从 GitHub 重新下载后逐字节读的），
+出新版本时请按[构建与验证](docs/构建与验证.md) §4 重新取一遍数字，别沿用。
 
 | 文件 | 说明 |
 |---|---|

@@ -1,24 +1,26 @@
 # 更新日志
 
 rbm 各版本的用户可见变更。版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
-「未发布」一节对应当前 `main`（提交 `5713308` 之后），尚未打成 tag、也没有对应的下载资产；
 已发布版本的内容以 GitHub Releases 的资产为准，构建 commit 见各节说明。
 
-## 未发布
+## 1.0.2 - 2026-10-17
+
+双语、删除后的表格重绘、文档层与许可证——即 1.0.1 之后落进 `main` 的东西
+（提交 `5713308`、`8343ef1`）。
 
 ### 功能
 
-- **界面与命令行中英双语**：默认中文，英文一键或一键参数可达。优先级为
+- **界面与命令行中英双语**（提交 `5713308`）：默认中文，英文一键或一参数可达。优先级为
   `--lang zh|en` > 环境变量 `RBM_LANG` > `%LOCALAPPDATA%\rbm\settings.json` 的 `"language"` > 中文。
   GUI 里 视图 → 界面语言 换语言后整窗立刻换文字，不需要重启；命令行九个子命令、帮助、报错、
   确认框全部走消息目录。落盘的内容不跟着语言走（`state.json`、两个 CSV 的表头、账本「已删」、
   分组标签），理由见[构建与验证](docs/构建与验证.md) §5.6。
-- **文档重排**：`README.md` 改为简体中文默认版，另出英文版 `README.en.md`；新增
+- **文档重排**（提交 `8343ef1`）：`README.md` 改为简体中文默认版，另出英文版 `README.en.md`；新增
   [文档索引](docs/README.md)、[路线图](docs/roadmap.md)、[已知问题](docs/known-issues.md) 与本文件。
 
 ### 修复
 
-- **删除跑完表格不立刻变灰**：换数据时只发布 `RowsReset`，Windows 的 ListView 带着
+- **删除跑完表格不立刻变灰**（提交 `5713308`）：换数据时只发布 `RowsReset`，Windows 的 ListView 带着
   `LVSICF_NOINVALIDATEALL` 收到它，行数不变或变少时一格都不重画，置灰、「已删」「剩余」列要等鼠标
   逐行划过才显形。现在两个表换数据一律补一次重绘（见
   [图形界面使用与解析](docs/图形界面使用与解析.md) §4、§9）。
@@ -27,8 +29,16 @@ rbm 各版本的用户可见变更。版本号遵循[语义化版本](https://se
 
 - 补 `LICENSE`（MIT）与 `THIRD-PARTY-NOTICES.txt`（六个 Go 模块的许可证全文）。
 - 发布包的内容从 `rbm.exe`、`rbm-gui.exe`、`README.md` 扩到再附 `README.en.md`、`LICENSE`、
-  `THIRD-PARTY-NOTICES.txt`（`.github/workflows/release.yml` 的打包步骤；v1.0.1 那份 zip 仍是三个成员）。
+  `THIRD-PARTY-NOTICES.txt`（`.github/workflows/release.yml` 的打包步骤）——**这一条从本版的 zip
+  才开始生效**，v1.0.1 那份仍是三个成员。
 - `.gitattributes` 给 `LICENSE` 与 `*.txt` 也钉上 LF，避免 runner 的 `core.autocrlf` 把许可文本检出成 CRLF。
+
+### 本版仍未解决
+
+- 「双击下载包里的 `rbm-gui.exe` 真能开界面」还没有人工验证记录；删除链路也没有真机 A/B 记录。
+- 重绘这一处修复没有自动化回归用例；新的打包清单要等本版产物落地后按 §3.7 复核一次。
+- `rbm-${VER}-sha256.txt` 里两行 exe 仍带 `dist/` 前缀。
+- 完整清单见[已知问题](docs/known-issues.md)与[路线图](docs/roadmap.md) 的 M7。
 
 ## 1.0.1 - 2026-10-16
 
