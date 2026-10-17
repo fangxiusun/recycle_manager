@@ -189,9 +189,12 @@ jobs:
       - name: 打包
         run: |
           set -euo pipefail
-          cp README.md dist/README.md
-          (cd dist && zip -q "../rbm-${VER}-windows-amd64.zip" rbm.exe rbm-gui.exe README.md)
-          rm dist/README.md
+          # zip 里带上两份 README（中文默认 + 英文）和许可文本：MIT 要求分发时附许可证，
+          # 而解压目录里如果只有中文版，英文用户看不到入口。
+          cp README.md README.en.md LICENSE THIRD-PARTY-NOTICES.txt dist/
+          (cd dist && zip -q "../rbm-${VER}-windows-amd64.zip" \
+            rbm.exe rbm-gui.exe README.md README.en.md LICENSE THIRD-PARTY-NOTICES.txt)
+          rm dist/README.md dist/README.en.md dist/LICENSE dist/THIRD-PARTY-NOTICES.txt
           sha256sum "rbm-${VER}-windows-amd64.zip" dist/rbm.exe dist/rbm-gui.exe \
             > "rbm-${VER}-sha256.txt"
           ls -l "rbm-${VER}-windows-amd64.zip" "rbm-${VER}-sha256.txt"

@@ -17,6 +17,9 @@
 *.py         text eol=lf
 *.rc         text eol=lf
 *.manifest   text eol=lf
+# 许可证与第三方声明没有扩展名或只有 .txt，不给规则就会被 runner 的 autocrlf 转成 CRLF
+LICENSE      text eol=lf
+*.txt        text eol=lf
 .gitignore   text eol=lf
 .gitattributes text eol=lf
 
