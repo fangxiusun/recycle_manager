@@ -8,6 +8,7 @@
 package parts
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -15,10 +16,12 @@ import (
 	"strings"
 	"time"
 
+	"rbm/internal/i18n"
 	"rbm/internal/meta"
 )
 
 // 分组占位标签，和 Python 版字面一致（state.json 也直接写这些串）。
+// 这四个是落盘口径不是界面文案，所以不进 i18n 目录：换了语言，快照和黄金样例就该对不上了。
 const (
 	Others  = "其他"
 	All     = "全部"
@@ -90,20 +93,20 @@ func ParseSpec(bucket string) (Spec, error) {
 	if strings.HasSuffix(key, "mo") {
 		n, err := strconv.Atoi(strings.TrimSuffix(key, "mo"))
 		if err != nil || n <= 0 {
-			return Spec{}, fmt.Errorf("无法识别的时间桶: %s（可用 minutely/hourly/daily/weekly/monthly/Nm/Nh/Nd/Nmo/auto/gap[:30m]）", bucket)
+			return Spec{}, errors.New(i18n.Tf("parts.bucket.unknown", bucket))
 		}
 		return Spec{Name: key, Kind: "month", Arg: n}, nil
 	}
 	if s, err := parseStep(key); err == nil {
 		return Spec{Name: key, Kind: "step", Arg: s}, nil
 	}
-	return Spec{}, fmt.Errorf("无法识别的时间桶: %s（可用 minutely/hourly/daily/weekly/monthly/Nm/Nh/Nd/Nmo/auto/gap[:30m]）", bucket)
+	return Spec{}, errors.New(i18n.Tf("parts.bucket.unknown", bucket))
 }
 
 // parseStep 把 30m/12h/3d/90s 换成秒；粒度必须为正，否则边界会原地打转。
 func parseStep(text string) (int, error) {
 	if text == "" {
-		return 0, fmt.Errorf("粒度不能为空，例如 gap:5m")
+		return 0, errors.New(i18n.T("parts.grain.empty"))
 	}
 	var unit int
 	switch text[len(text)-1] {
@@ -116,14 +119,14 @@ func parseStep(text string) (int, error) {
 	case 'd':
 		unit = day
 	default:
-		return 0, fmt.Errorf("无法识别的粒度单位 %q（只能用 s/m/h/d）", text[len(text)-1:])
+		return 0, errors.New(i18n.Tf("parts.grain.unit", text[len(text)-1:]))
 	}
 	n, err := strconv.Atoi(text[:len(text)-1])
 	if err != nil {
-		return 0, fmt.Errorf("粒度的数字无法识别: %s", text)
+		return 0, errors.New(i18n.Tf("parts.grain.number", text))
 	}
 	if n <= 0 {
-		return 0, fmt.Errorf("粒度必须大于 0: %s", text)
+		return 0, errors.New(i18n.Tf("parts.grain.positive", text))
 	}
 	return n * unit, nil
 }

@@ -1,323 +1,233 @@
-# rbm：Windows 回收站分批管理
+# rbm — empty a stuffed Windows Recycle Bin in reviewable batches
 
-一个不依赖 Python、不依赖 CGO 的单文件 `rbm.exe`：双击是原生 Win32 图形界面（lxn/walk），带子命令
-是命令行，两边加一个交互 shell 共用同一个内核。
+**rbm** reads the Recycle Bin's own metadata, splits what it finds into numbered batches, and lets you
+permanently delete a batch at a time — with per-batch counts and sizes, a progress line, a full CSV
+manifest, and an append-only ledger of every deletion. One static executable per build: no Python, no
+CGO, no installer.
 
-要解决的问题：回收站里堆了几十万个条目时，系统「清空回收站」会长时间无反馈。这里的做法是直读
-`$Recycle.Bin\<当前用户SID>\$I*` 元数据 → 按删除时间切批（命令行与代码里叫「时间桶」，图形界面里
-叫「按时间分批」）→ 批内按原路径目录（或字符前缀/扩展名/文件名首段）归堆 → 每个分区给一个编号并
-统计元素数与大小 → `show <编号>` 看清单 →
-`delete 1-5,8-10,16` 分批永久删除，删一批确认一批。
+Double-click it and you get a native Win32 GUI (built on `lxn/walk`); run it with a subcommand and you
+get a CLI; both share the same engine and the same snapshot file, so a partition number means the same
+thing in both.
 
-**平台**：仅 Windows（本机 x86_64 实测）。**只读回收站的元数据，删除是永久删除，不进回收站、
-不可恢复。**
-
----
-
-## 1. 目录结构
-
-```
-main.go             17 行：有参数走 CLI，无参数开图形界面
-build.bat           一键构建：windres 出 rsrc.syso，再编 `rbm.exe`（命令行）和 `rbm-gui.exe`（双击）
-rbm.rc                1 行：把 rbm.manifest 编进 exe
-rbm.manifest         asInvoker + Common Controls 6.0 + PerMonitorV2/system DPI
-internal/meta/     347 行  $I 头解析、SID/盘符发现、单次扫描上限与截断统计
-internal/parts/    794 行  时间桶（含日历月与 3mo 这类 N 月步进）、四种分组维度、编号与重排
-internal/store/    233 行  state.json / scan_list.csv / ledger.csv 的落盘格式
-internal/engine/   272 行  CLI 与 GUI 共用的内核：建快照、选分区、三层闸门删除
-internal/cli/      932 行  scan/parts/show/delete/shell 五个子命令与交互 shell
-internal/gui/     1744 行  walk 面板：参数区 + 分区表 + 明细表 + 日志
-internal/tty/      146 行  人话字节数、中英文混排宽度、表格与编号区间解析
-internal/winfs/    164 行  存在性/属性判断、递归删除、FILETIME 换算
-docs/图形界面使用与解析.md  walk 那套窗体系统的构成与用法详解（控件树、模型视图、线程、删除闸门落点、免黑框）
-docs/选项说明.md         ① 参数区逐项说明：按时间分批的 16 个写法、桶内分组四项、两个配角、高级参数
-```
-
-判定逻辑（分区、编号、保险丝、账本、剩余计数）全部在 `internal/engine`，`cli` 和 `gui` 只做展示
-与确认。所以 GUI 里看到的编号和命令行 `show`/`delete` 用的是同一份 `state.json`、同一套编号。
+> **Bilingual: Chinese by default, English one click or one flag away** — see [Language](#language).
+> The rest of this file quotes the Chinese labels, because that is what a fresh install shows.
 
 ---
 
-## 2. 构建
+## Why this exists
 
-环境（本机实测）：Go 1.24.5、`CGO_ENABLED=0`、`GOTOOLCHAIN=local`，依赖只有 `go.mod` 里四个：
-`github.com/lxn/walk`、`github.com/lxn/win`、`github.com/mattn/go-runewidth`、
-`golang.org/x/sys`（都是纯 Go，无需 C 工具链，只有下面第 1 步的资源编译需要 `windres`）。
+I do a lot of vibe coding with agents. Agents rewrite and regenerate files by the thousand, and the
+files they delete don't disappear — they pile up in the Recycle Bin. On my machine that reached
+**hundreds of thousands of objects**. At that size the system's *Empty Recycle Bin* runs for a very
+long time with no feedback at all, and Explorer hangs and restarts itself while it's at it. That is my
+own machine, not a claim about every Windows install — but it was enough to make me want a way to empty
+the bin that I could actually watch, steer, and resume.
 
-在仓库根目录，直接跑 `build.bat`（一次产出两份），或者手工按下面三步来：
+So instead of one blind "empty everything" call:
+
+```
+$Recycle.Bin\<your SID>\$I*   →   bucket by deletion time   →   group by original folder
+                                →   numbered partitions      →   show a partition
+                                →   delete partition 1-5, 8-10, 16
+```
+
+Each batch is confirmed on its own, so a bin holding hundreds of thousands of objects becomes a series
+of small, boring, observable operations instead of one unbreakable multi-hour block.
+
+---
+
+## ⚠️ What rbm does to your data
+
+- **Delete is permanent.** It removes the `$R` payload and the `$I` metadata directly. Nothing goes
+  back into the Recycle Bin, nothing is recoverable.
+- Scanning is **read-only** — rbm only parses `$Recycle.Bin\<SID>` metadata for the current user.
+- Three gates stack up before anything is deleted: **preview / `--dry-run`** (default, touches no
+  files) → **confirmation dialog** (states the size of the batch and the partition ids) →
+  **deletion fuse / `--max N`** (if the selection exceeds N items the whole batch is refused — and the
+  ledger file isn't even opened).
+- Everything is on disk afterwards: `scan_list.csv` is the full manifest of the snapshot, `ledger.csv`
+  records one line per deletion attempt with its result.
+
+---
+
+## Language
+
+Chinese is the default; English is one menu click or one flag away. Highest priority first:
+
+| How | Scope |
+| --- | --- |
+| `--lang en` — `rbm.exe parts --lang en`, or `rbm.exe --lang en` with no subcommand to open the GUI in English | this process only |
+| `set RBM_LANG=en` | any process that inherits the environment variable |
+| 视图 → 界面语言 → 英文 in the GUI (writes the file for you), or `%LOCALAPPDATA%\rbm\settings.json` field `"language"` | the standing default |
+| none of the above | Chinese |
+
+An unrecognised value falls through to the next level instead of erroring. Switching inside the GUI
+re-texts the open window immediately — no restart — and logs the settings file it wrote; lines already
+in the activity log keep the language they were written in. If you run in English, the two buttons
+Quick start describes below read **【Preview delete (touches nothing)】** and
+**【⚠ Delete forever: partitions N, items M】**.
+
+**What stays Chinese in both languages:** everything written to disk. `state.json`'s field names and
+values (including the recorded bucket spec `gap:自动断点(<= 12 桶)`), the Chinese headers of
+`scan_list.csv` and `ledger.csv` and the ledger's result value 「已删」, and the group labels that feed
+both files: 「其他」「全部」「元数据损坏」「特殊位置」「(根)」「(无扩展名)」. Those are data, not
+interface — re-labelling them would invalidate snapshots already on disk and the byte-for-byte
+comparison against the reference implementation's fixtures.
+
+---
+
+## Requirements
+
+- **Windows x86_64**, and only that: `internal/gui` depends on `lxn/walk` and `golang.org/x/sys/windows`,
+  whose files carry `//go:build windows`, so the package does not even compile on Linux or macOS.
+- No runtime dependencies. Everything is pure Go and built with `CGO_ENABLED=0`: four direct module
+  requires (`lxn/walk`, `lxn/win`, `go-runewidth`, `golang.org/x/sys`) plus two indirect ones.
+- It looks at the **current user's** `$Recycle.Bin\<SID>` only — other users' bins, and `$R` files with
+  no matching `$I`, are reported in an anomaly list and left alone. Run it as the user whose Recycle Bin
+  you want to manage.
+
+## Download
+
+Latest release: **[v1.0.1](https://github.com/fangxiusun/recycle_manager/releases/tag/v1.0.1)**
+(all releases: <https://github.com/fangxiusun/recycle_manager/releases>)
+
+| Asset | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `rbm-v1.0.1-windows-amd64.zip` | 9,723,847 | `6db729491ce1efd45c65edda83685a41eaa0fb4916ca2d8d0a1f1d0084282452` |
+| `rbm-v1.0.1-sha256.txt` | 257 | `dbcca8965558304a11f5f7c81f9c16d5fb039cbfdebcdb93e7ff8e7a0612e74c` |
+
+The zip contains three files: `rbm.exe` and `rbm-gui.exe` (9,623,040 bytes each) and `README.md`.
+Checked on 2026-10-17 by re-downloading the assets and reading the PE headers of the members:
+
+| Inside the zip | PE Subsystem | SHA-256 |
+| --- | ---: | --- |
+| `rbm.exe` | 3 (console) | `9665a2245ed0b1193ad1a5e0abb405917d57a571fe8e01c5dfab12eae312cbdc` |
+| `rbm-gui.exe` | 2 (GUI) | `82fe1bb7291e0ac86a9a446db5514890ee48de33c3a64de7e38318b5c7bdcf5b` |
+
+```powershell
+Get-FileHash .\rbm-v1.0.1-windows-amd64.zip -Algorithm SHA256   # should match the first table row
+```
+
+Note: the two `.exe` lines in `rbm-v1.0.1-sha256.txt` are labelled `dist/rbm.exe` / `dist/rbm-gui.exe`
+while the zip stores bare names — match the hashes, not the file names. Details in
+[`docs/构建与验证.md`](docs/构建与验证.md) §4.
+
+## Quick start — GUI
+
+1. Unzip, **double-click `rbm-gui.exe`**. No console window appears at any point (it is built with
+   `-H windowsgui`, so the loader never allocates one).
+2. The window **scans on open** and shows what the Recycle Bin holds right now. Wait for the log line
+   with the elapsed time and the partition count.
+3. Pick batches in ③: tick boxes (Shift-click spans a range), or type ids like `1-5,8-10,16`,
+   or 【全选】 to take every partition that still has undeleted items.
+4. Click a row in ④ to see its contents in ⑤.
+5. Press **【预览删除（不动文件）】** first. Only then press
+   **【⚠ 永久删除 N 个分区 / M 个条目】** and confirm the dialog.
+6. Check the 「未删完」/「剩余」 columns, then F5 to rescan and take the next batch.
+
+The panels are numbered ①–⑥ in the order you use them: ① scan options, ② scan + overview,
+③ selection, ④ partition table, ⑤ item detail, ⑥ preview/delete + progress. Batch strategy is the
+「按时间分批」 dropdown (16 presets, last one is free-form) plus 「桶内分组」 (folder / character
+prefix / extension / first filename token).
+
+Two things to know before you start:
+
+- Opening the GUI **overwrites** `state.json` and `scan_list.csv` in the snapshot directory
+  (default `<cwd>\.rbm`) with the current state of the bin. Keep a snapshot you still need by pointing
+  【▼ 高级参数】→ snapshot directory somewhere else first.
+- Turning on 「只看未删完」 (show only unfinished) **clears your ticks** — the view changed, and stale
+  ticks are how you delete the wrong batch. Sorting by column header does *not* clear ticks.
+
+## Quick start — CLI
+
+Use `rbm.exe` for anything scripted (see "Which executable" below).
 
 ```bat
-:: 0) 一键：build.bat 就是把下面三步串起来，任何一步失败即 exit 1
+rbm.exe scan                        :: build a snapshot, write state.json + scan_list.csv
+rbm.exe parts                       :: list the numbered partitions of that snapshot
+rbm.exe parts --alive --sort size   :: only partitions with items left, biggest first
+rbm.exe show 3                      :: list items inside partition 3
+rbm.exe delete 1-5,8-10,16          :: dry-run: prints what would go, touches nothing
+rbm.exe delete 1-5,8-10,16 --yes    :: permanently delete those batches
+rbm.exe shell                       :: interactive: scan once, reuse that in-memory snapshot
+rbm.exe --help                      :: subcommands;  rbm.exe <subcommand> -h  :: its options
+```
+
+Nine partition options (`--bucket --max-buckets --by --dir-level --prefix-len --max-parts --min-count
+--drives --max-scan`) map one-to-one onto the GUI parameter area; every command takes `--state-dir`
+(default `<cwd>\.rbm`) and `--lang zh|en` (see [Language](#language)). **Exit codes**: `0` success /
+cancelled / dry-run / bin is empty;
+`1` data or runtime error (no snapshot, id out of range, unknown bucket spec, no recycle bin for this
+SID on the requested drive); `2` usage error, unconfirmed delete, or the `--max` fuse blew.
+
+`shell` is the mode for a bin of that size: it scans once and keeps that snapshot in memory, so
+partition ids don't drift while you work through them.
+
+Artifacts, all in the snapshot directory: `state.json` (the snapshot), `scan_list.csv` (full manifest,
+UTF-8 BOM + CRLF so Excel opens it by double-click), `ledger.csv` (one appended line per deletion,
+created only on a real delete).
+
+## Which executable to use
+
+| | `rbm-gui.exe` | `rbm.exe` |
+| --- | --- | --- |
+| Built with | `-ldflags "-H windowsgui"` | default |
+| PE Subsystem | 2 (GUI) | 3 (console) |
+| Use it for | double-clicking; never shows a console window | CLI, scripts, pipes |
+| Console | the loader allocates none | one exists; the GUI path calls `FreeConsole` after the window opens |
+| Errors | no terminal to print to | stderr goes to your terminal — use this one when debugging |
+
+`rbm-gui.exe` does run the subcommands, but PowerShell doesn't wait for a GUI-subsystem process: piping
+it or capturing its output can end up truncated. Stay on `rbm.exe` in scripts.
+
+## Documentation
+
+The three docs under `docs/` are written in Chinese and quote the Chinese screen labels (the default
+language, see [Language](#language)); this README is the English entry point.
+
+| File | What it covers |
+| --- | --- |
+| `README.md` | this file — what/why/which/how to get started |
+| [`docs/选项说明.md`](docs/选项说明.md) (Chinese) | every parameter in ① : the 16 batch presets, the four grouping modes, the advanced options, and when each one takes effect |
+| [`docs/图形界面使用与解析.md`](docs/图形界面使用与解析.md) (Chinese) | the GUI in depth: widget tree, model/view, threading, where the three delete gates sit, why no console flashes, how the in-window language switch re-texts every control |
+| [`docs/构建与验证.md`](docs/构建与验证.md) (Chinese) | build steps and why `rsrc.syso` is not optional, the GitHub Actions release pipeline, released-asset verification, full CLI reference and measured exit codes, the language precedence chain and what deliberately stays Chinese, partition semantics and validation, test inventory, known limitations |
+
+## Build from source
+
+```bat
 build.bat
+```
 
-:: 1) 生成界面资源（必须在主包目录，产物 1228 字节）
+which is these three steps (any failure exits 1):
+
+```bat
 windres --input=rbm.rc --input-format=rc --output=rsrc.syso --output-format=coff
-
-:: 2) 编译：控制台子系统（PE subsystem=3），命令行用这份
 set CGO_ENABLED=0&& set GOTOOLCHAIN=local&& go build -o rbm.exe .
-
-:: 3) 纯图形版，进程从头就不创建控制台（PE subsystem=2），双击用这份
 go build -ldflags "-H windowsgui" -o rbm-gui.exe .
 ```
 
-- **第 1 步不能跳。** `go build` 在没有 `rsrc.syso` 时照样成功，但一开界面就失败：实测把
-  `main.go`+`internal/` 拷到别处（没有 `rsrc.syso`）编译后运行，立刻退出码 1，stderr 是
-  `图形界面创建失败: TTM_ADDTOOL failed`（walk 的控件要 Common Controls 6.0，而 v6 控件只能靠
-  manifest 声明）。同一份代码带上 `rsrc.syso` 后运行 4 秒无任何报错。重跑上面 `windres` 命令
-  得到的文件和仓库里那份 MD5 相同（17:28 由 `build.bat` 重新生成的那份是 1 228 字节、
-  `e997c9c9066df5e39c1994d71bbccf17`，与 17:07 那一次逐字节相同），所以这一步可复现。
-- **两份产物的分工：命令行用 `rbm.exe`，双击用 `rbm-gui.exe`。** 17:15 轮读 PE 头（`e_lfanew` 在
-  `0x3C`，Subsystem 在 `e_lfanew+4+20+68`）：`rbm.exe`（MD5 `FBFA9E04FD19F3BC264880F587E2AEA3`、
-  9 636 864 字节）Subsystem = **3**，`rbm-gui.exe`（MD5 `77CF441CB52D0E10BFC57B816162BE00`、同尺寸）
-  = **2**——后者加载器根本不分配控制台，所以黑框不是「闪一下就没」而是从头不出现。实测起它一次
-  （17:18 轮，先 `SetProcessDPIAware` 再量，物理像素）：该 PID 名下顶层 11 行，**可见的只有 1 个**
-  （`\o/ Walk_MainWindow_Class \o/`，`rect=(38,38,2138,1446)` = 2100×1408 物理 / 1400×939 逻辑），
-  按类名筛 `Console` 命中 0 个；发 `WM_CLOSE` 后 3 秒内自己退出。
-  `rbm.exe` 走 GUI 分支时靠 `internal/gui/gui.go:540` 的 `FreeConsole` 甩掉系统为双击新建的控制台，
-  那是「先有再放」，做不到零闪烁；它的好处是出错误信息时 stderr 还能回到终端（GUI 产物没有终端可回，
-  排查就改用 `rbm.exe`）。两条完整记录见 `docs/图形界面使用与解析.md` §10。
-- **GUI 产物也能跑命令行，但别在 PowerShell 里直接调它。** 17:30 轮：`cmd /c` 下两份对同一份快照各跑
-  `parts`，都返回码 0、各 124 行，逐行比对一字不差；未知子命令也都返回 2、首行同一句。可同一行命令不套
-  `cmd /c` 直接 `& rbm-gui.exe parts …`，PowerShell 不等它——只拿到 1 行、33ms 返回，而 `& rbm.exe`
-  拿到完整的 124 行、106ms。管道里用 GUI 产物会读到残缺输出。同理，17:21 轮拿 `Start-Job` 起 GUI：
-  `rbm.exe` 的 job 6 秒后还在 `Running`（等到关窗才结束，自报 5 966ms），`rbm-gui.exe` 的 job 116ms
-  就返回、窗口照常在。
-- 自检三条：`go vet ./...`、`gofmt -l internal/`、`go test -count=1 ./...`（用例清单见 §7）。
+Go 1.24.5 and `CGO_ENABLED=0` are what this is built with; `windres` (MinGW binutils) is the only
+toolchain piece beyond Go. **Step 1 is not optional**: `go build` succeeds without `rsrc.syso` and then
+the GUI dies immediately with `图形界面创建失败: TTM_ADDTOOL failed`, because Common Controls 6.0 can
+only be requested through the embedded manifest.
 
----
+Checks before pushing: `go vet ./...`, `gofmt -l internal/`, `go test -count=1 ./...`
+(93 top-level cases + 75 sub-cases as of 2026-10-17, all green; they use synthetic `$I` fixtures and temp
+directories, so `go test` never touches a real Recycle Bin and needs no Python. Ten of those cases are the
+message catalog itself — every key must exist in both languages, and every `%d` in a string must actually
+be consumed).
 
-## 3. 图形界面
+## Known limitations
 
-启动：双击 `rbm-gui.exe`（黑框从头就不出现，见 §2），双击 `rbm.exe` 也能开（控制台子系统那份，
-靠 `FreeConsole` 事后甩掉控制台），或在终端里直接运行不带参数的可执行文件。窗口标题
-「回收站分批管理 rbm」，默认 1400×900（实测按内容最小高撑到逻辑 1400×939），最小 1080×680，
-可拖中间的分隔条调整左右表宽度。
-
-**一打开窗口就自动扫描一次**（不读上次那份快照）：界面显示的是回收站此刻的内容，编号也按此刻
-内容重建。同时弹一个非模态小提示窗「正在扫描，请等待完成…」，扫完自己关，嫌挡手也可以先点它
-的【关闭】或标题栏的 ×。日志区依次出现「开始扫描（全部盘，按…分批，单次上限 …）…」`gui.go:1221`
-和「扫描完成（用时 …）：条目 N 个 / …，分区 N 个，编号 1..N。」`gui.go:1250`（条目为 0 时换成
-`gui.go:1247` 那句「这是正常结果，不是错误」），两张表随之填满，全程不需要点任何按钮；用时那句还会
-留在 ⑥ 的进度文字里（「进度 空闲｜上次扫描用时 830ms」）。
-本机实测：2026-10-16 13:24:38 这一轮自动扫描是 774 个条目 / 139.1MB / 9 个分区，用时 830ms；
-命令行 `scan` 对同一批条目的三轮实测是 265 / 315 / 193 ms（见 §5）。自动扫描那几轮之后快照里 `deleted` 合计都是 0。之后要刷新状态按 F5。自动扫描走的是与点按钮同一条路径，所以**打开窗口就会
-把 `<快照目录>\state.json` 和 `scan_list.csv` 覆写成此刻的回收站**；想留住某份旧快照给命令行
-`show`/`delete`，先展开【▼ 高级参数】改快照目录，或备份那个 `.rbm` 文件夹。
-
-界面自上而下按 ①~⑥ 编号，编号就是日常操作的顺序（控件树、模型视图、线程与勾选的实现细节见
-`docs/图形界面使用与解析.md`）：
-
-| 区域 | 内容 |
-| --- | --- |
-| 菜单 | 文件(F)：扫描/重扫(F5)、打开快照目录、退出；视图(V)：展开/收起高级参数、全选当前视图的分区、清空勾选；帮助(H)：使用说明、关于 rbm |
-| ① 扫描配置 | 只显示对当前分组生效的项：**按时间分批**（老代码里的「时间桶」，16 项下拉，末项「自定义」才露手填框）、**桶内分组**常显，「目录层级」只在分组=目录 dir 时出现，「前缀长度」只在 prefix / token 时出现（切分组时它们占同一个位置，不会留空档）。其余六项（桶数上限、分区上限、小组并入、限定盘符、单次扫描上限、删除保险丝）和快照目录 +【打开目录】一起收在右侧【▼ 展开高级参数】里；收起时不占位，但里面的值照常生效。每个选项在说什么、什么时候生效，见 `docs/选项说明.md` |
-| ② 扫描结果 | 【扫描 / 重扫 (F5)】（锁宽 120 逻辑像素，17:34 实测矩形 180×33 物理像素@150%DPI，按钮右侧的整条空白由 spacer 占着，所以它不会被拉成一整条）；下面一行蓝色概览：分区 / 对象 / 未删完 / 已勾选，四组数字跟着勾选实时变 |
-| ③ 选择分区 | 【全选】【清空勾选】在最前，然后是按编号勾选 +【应用】、文件名前缀过滤、只看未删完 |
-| ④ 分区列表 | 9 列（编号/时间范围/路径组/元素数/大小/index区间/盘/剩余/组内构成示例），最左列是勾选框；上方一行写视图行数、快照分区数、未删完条目、勾选统计 |
-| ⑤ 元素明细 | 6 列（index/删除时间/大小/盘/文件名/原路径）；上方一行是 ④ 当前行的分区概况，没内容时换成一句说明（还没有快照 / 视图里 0 个分区 / 还没点行 / 前缀过滤后 0 个） |
-| ⑥ 删除操作 | 【预览删除（不动文件）】（锁宽 165）+【⚠ 永久删除 N 个分区 / M 个条目】（宽 240，上限 280）+ **同一行的进度条** + 一句「进度 空闲 / 扫描中… / 删除中 n/N（成功 x，失败 y）」，空闲时这句会带上「上次扫描用时 …」；这两个按钮和 ② 的扫描按钮一样两侧留白，16:18 实测未勾选与【全选】后文字换了长短，两个按钮的矩形都没动，剩余宽度归进度条（17:34 在这份产物上重读未勾选态仍是 248 / 360 物理像素）；按钮文字随时报出这批要删多大规模，没勾选时写「⚠ 永久删除（未勾选分区）」 |
-| 主区 | ④ 和 ⑤ 左右分栏（HSplitter 可拖），各自带一行概览标题 |
-| 底部 | 日志标题带行数 +【清空】【复制】+ Consolas 9 只读日志区（进度条已并到 ⑥ 那一行，这里只剩日志）。每追加一条日志都自动跳到最新一行，扫描/删除刷屏时无需手动拖滚动条 |
-| 状态栏 | 三段：当前动作（● 就绪 / 扫描中…）、快照概况（时间｜条目｜分区）、勾选提示 |
-
-参数默认值与命令行一致：分组 `dir`、目录层级 `2`、前缀长度 `3`、桶数上限 `12`、分区上限 `120`、
-小组并入 `5`、单次扫描上限 `50000`、删除保险丝 `0`（不限）、快照目录
-`<当前目录>\.rbm`。「按时间分批」下拉的第一项「自动找删除空档（默认）」交给引擎的是空串（= 按删除
-时间的断点自动切区）；中间 14 项是固定写法——`gap:15m`/`gap:1h`/`gap:1d` 三个空档门槛，加
-`每 15 分钟一批`…`每 6 个自然月一批` 十个等宽/日历粒度，再加 `自动挑最合适的固定粒度（auto）`。
-最后一项「自定义：手填写法」选中才会露出手填框，写
-`daily`/`30m`/`3mo`/`gap:5m`/`auto` 这类原始写法（16 项的含义、规则与实测见 `docs/选项说明.md` §2）。
-数字框留空按默认值，填非整数或负数会在
-日志里回一句「「某某」要填整数，现在填的是 …」。
-
-日常操作六步（和 ①~⑥ 一一对应，【帮助→使用说明】里也是这六步 —— 那是一扇独立窗口：边框可拖大拖小，
-打开时不选中任何文字，要带走哪段就按住左键框选那一段再按 Ctrl+C，Esc 和空格都等价【关闭】，
-不再是只能看一眼就消失的弹框）：
-
-1. ① 里按需改参数，② 点【扫描 / 重扫】≈ `rbm scan`：建新快照，写出 `state.json` +
-   `scan_list.csv`，日志里给用时、条目数、分区数；超过「单次扫描上限」时打印截断说明和各盘
-   「已扫/总数」，并给出两条继续办法（调大上限一次看全 / 删一批再重扫）。窗口一打开已经自动
-   扫过一轮，不改参数就不用再点。
-2. ③ 里选批次：【全选】勾上当前视图里所有还有未删条目的分区（已删完的跳过 —— 它们没有 `$I`/`$R`
-   可删，逐条报「文件不存在」只会淹掉日志）；也可以在最左列点方框逐个勾（选中后按空格也行），
-   **按住 Shift 再点另一个方框，两点之间（含两端）一起勾上**，或在「按编号勾选」里填
-   `1-5,8-10,16` 再点【应用】一次勾上一批。编号不在当前视图里（被「只看未删完」挡着）会明确
-   告诉你勾了几个、哪些编号没找到。
-3. 单击 ④ 某一行（或双击）≈ `rbm show <编号>`：⑤ 列出这个分区的元素，标题行写清编号、时间范围、
-   组名、元素数/大小、index 区间、盘符。刷新视图后默认回到第一行。
-4. 【预览删除】≈ `delete --dry-run`：只把选中统计和明细打进日志/⑤，不碰文件。
-5. 【⚠ 永久删除 N 个分区 / M 个条目】≈ `delete --yes`：弹「永久删除确认」框，红字加粗地写出规模、
-   选中编号（超过 20 个只列前 20 个，完整清单在【预览删除】的日志里）和快照文件路径，只有点到
-   【确认永久删除】这一个动作才动手（`gui.go:1445`；这个对话框没有默认按钮，也没有输入框要填）；
-   点【取消】就一句「已取消，未做任何改动。」
-6. 删完看 ② 的「未删完」和 ④ 的「剩余」列核对进度；逐笔记入 `ledger.csv`，进度条每 100 条刷一次，
-   旁边那句「进度 删除中 n/N（成功 x，失败 y）」跟着走。
-
-两张表都能**点列名排序**：点一下升序、再点同一列降序（表头有箭头）。分区表的勾选是按编号记的，
-所以点表头重排也不会让勾选漂到别的分区上；明细表排序只影响显示顺序。③ 里原来那个「排序」下拉框
-因此去掉了。
-
-三层删除闸门是叠加的：**预览**（默认不动手）→ **弹窗确认**（列出规模和编号，点【取消】就一行
-「已取消，未做任何改动」）→ **删除保险丝**（填 N，选中条目数超过 N 就整批不动，且此时账本文件都
-不会被打开）。
-
-两个容易踩的行为，是设计如此：切换「只看未删完」会**清空勾选**（视图换了，留着旧勾选可能删错
-批次），日志里同时说明这次到底隐藏了几个分区 —— 刚扫完的快照没有「已删完」的分区，勾上它一行也
-不会少，不解释看上去就像点了没反应；点表头排序**不**清空勾选，它只重排当前这批行。删完的分区整行
-变灰，「剩余」列给的是 `未删/总数`（`gui.go:255` 的 `%d/%d`：刚扫完的一批 721 个条目显示 `721/721`，
-删完是 `0/721`，不留空白）。
-
-日志每行是 `HH:MM:SS` + 级别前缀（`·` 普通、`✓` 成功、`!` 警告、`×` 错误），多行内容的续行对齐到
-正文列；【复制】把整段日志放进剪贴板，【清空】只清显示、不动磁盘上的账本。
-
-
----
-
-## 4. 命令行
-
-```
-回收站分批管理工具（分区编号 → 查看 → 批量删除）
-
-用法: rbm <子命令> [选项]
-
-子命令:
-  scan    扫描回收站并按「时间桶 × 原路径目录」分区编号，写出统计
-  parts   重列已扫描快照的分区统计
-  show    查看某个编号分区内的元素列表（index 区间）
-  delete  按编号（如 1-5,8-10,16）分批永久删除分区内容，默认 dry-run
-  shell   进入交互 shell：启动即 scan，之后的 show/delete 复用同一份内存快照
-```
-
-`rbm <子命令> -h` 看单个命令的选项，`rbm --help` 看上面这段。九个分区参数
-（`--bucket --max-buckets --by --dir-level --prefix-len --max-parts --min-count --drives
---max-scan`）在 GUI 参数区一一对应，写法支持 `--name v`、`--name=v`、`-name`、布尔开关 `-v`，
-选项和位置参数可以混写，`--` 之后全当位置参数。常用其余选项：
-
-- `parts`：`--alive`、`--sort time|size|count`
-- `show`：`--start N --end N`、`--prefix 串`、`--limit N`（默认 40，0 = 全部）、`--tail`（从尾部
-  数着显示）、`--local`（序号换成分区内序号从 1 数，默认显示的是全局 index）
-- `delete`：`--dry-run` / `--yes`、`--prefix 串`、`--max N`（保险丝）、`--sample N`（默认 15）、
-  `--every N`（默认 200 刷一次进度）、`-v`
-- 所有命令：`--state-dir 目录`，默认 `<当前目录>\.rbm`
-
-**shell** 是给「几万条要删一上午」准备的：进去先 `scan` 一次，之后的 `show`/`delete` 都用内存里
-这份快照，编号不会因为你删了一批就漂走。会话命令是 `scan / parts / show / delete / info /
-help / quit|exit|q|退出`。提示符带着当前快照的规模，本机 2026-10-16 13:57 实测是
-`rbm[13:31:50 快照 774条/9区 剩774]> `（方括号里是快照时间）；用 `--no-scan` 进去时内存里还没有快照，头一个提示符
-是光秃秃的 `rbm> `，等某条命令把快照读进来之后才开始带规模。会话里没写 `--state-dir` 的命令自动
-沿用启动时那个目录。`--no-scan` 跳过启动扫描（只读旧快照）。
-
-**退出码**：`0` 成功 / 取消 / dry-run / **扫到 0 个条目**；`1` 数据或运行错误（没有快照、编号越界、
-时间桶写法不认、指定盘上没有当前用户的回收站目录）；`2` 用法错误、未确认删除、或踩了保险丝。
-本机 2026-10-16 13:55~13:58 的实测（快照是 774 条目 / 9 个分区那份；保险丝那两条打在一份**假路径**
-的快照副本上，真实回收站一个字节都没动）：
-
-| 命令 | 退出码 | 最后输出 |
-| --- | --- | --- |
-| `delete 1-2 --dry-run` | 0 | 「未做任何改动。确认无误后加 --yes 执行真删除。」 |
-| `delete 999` | 1 | 「编号 999 超出范围 1-9」 |
-| `show 0` | 1 | 「编号 0 超出范围 1-9」 |
-| `delete 1 --sample 5`（不带 `--yes`） | 2 | 「这是不可逆操作。加 --yes 明确确认后再执行…」 |
-| `delete 2 --max 1 --yes` | 2 | 「条目数 17 超过 --max 1，已中止。可分区分批删。」（此时账本文件都不会被创建） |
-| `parts --sort bad` | 2 | 「rbm parts: error: 选项 --sort 的取值无法识别: bad」 |
-| `scan --by bad` | 2 | 「rbm scan: error: 选项 --by 的取值无法识别: bad」 |
-| `scan --bucket 5x` | 1 | 「无法识别的时间桶: 5x（可用 …）」 |
-| `scan --bucket gap:0m` | 1 | 「粒度必须大于 0: 0m」 |
-| `scan --drives c`（该盘有目录但回收站是空的） | 0 | 「回收站里当前用户没有对象（0 个条目），这就是扫描完成的结果，不是错误。」 |
-| `scan --drives e`（该盘没有这个目录） | 1 | 「指定盘 e 下没有当前用户的回收站目录」 |
-
-**产物三件套**（都在快照目录里）：`state.json` 快照本体；`scan_list.csv` 本次快照的全量清单，
-带 UTF-8 BOM、CRLF 行尾，Excel 双击即开；`ledger.csv` 删除账本，每删一条追加一行（操作时间/编号/
-index/删除时间/字节/盘/文件名/原路径/结果），只在真删时创建。
-
----
-
-## 5. 分区口径与参数校验
-
-这几条是从 `$I` 元数据到编号之间的取舍，看代码时容易踩，都写在这里：
-
-- **时间桶的非法写法直接拒绝，退出码 1**，不会静默改变分区结果。本机实测：`0m`/`0h`/`0d`/`0mo`/`5x`
-  → `无法识别的时间桶: …（可用 minutely/hourly/daily/weekly/monthly/Nm/Nh/Nd/Nmo/auto/gap[:30m]）`；
-  `gap:0m` → `粒度必须大于 0: 0m`；`gap:abc` → `无法识别的粒度单位 "c"（只能用 s/m/h/d）`。
-  合法写法：`minutely hourly daily weekly monthly 3mo 30m gap:5m auto`。
-- **不可表示的删除时间**按「元数据损坏」处理：FILETIME 换算出的 epoch 落在
-  `[86400, 32536713599]` 秒（约 1970-01-02 至 3001-01-18，`internal/meta/meta.go:157`）之外就判掉，
-  正常删除时间不可能落在外面。这类条目单独成组并写进异常记录，不会混进正常分区。
-- **时区**在启动时取当前 UTC 偏移构造 `time.FixedZone`（`internal/meta/meta.go:53`）。本机
-  `TimeZoneKeyName = China Standard Time`、`GetTimeZoneInformation` bias = −480 且无夏令时，
-  所以时间范围渲染与本机一致；跨夏令时的历史条目会被按当前偏移解释（见 §8）。
-- **原路径只有一个盘符**（`D:`）时取不到文件名，`baseName`（`internal/meta/meta.go:212`）返回空串，
-  display 退回 `$I` 文件名的尾巴，不会显示成空行。
-- **`state.json` 是紧凑 JSON**，并把 `<` `>` `&` 转义成 `\u003c` 等（`json.Marshal` 默认行为）。
-  本机 774 条的快照写出来 351,893 字节，`scan_list.csv` 196,946 字节（2026-10-16 13:45 实测）。
-- **`--state-dir` 走 `filepath.Join` 归一化**，`G:/tmp/x` 会写成 `G:\tmp\x\scan_list.csv`。
-- **扫到 0 个条目不是错误**：`Scan`/`BuildState` 照样落盘（空快照 + 空清单），命令行返回 0 并解释
-  两句，GUI 走 `gui.go:1247` 那句「这是正常结果，不是错误」。仍然报错的是**指定盘上根本没有当前
-  用户的回收站目录**（`--drives e` → 退出码 1）。详见 `docs/选项说明.md` §6。
-
-**耗时**（本机真实回收站，774 条目 / 139.1MB / 9 分区，2026-10-16 13:45 各跑三轮）：`scan`（全量
-元数据解析 + 分区 + 写两份产物）265 / 315 / 193 ms；`parts`（读快照重列）62 / 55 / 59 ms。也就是说
-首次解析元数据是主要开销，只读快照的命令在 0.06 s 上下（瓶颈在快照文件本身）。GUI 自动扫描同一批
-条目的实测是 830ms（§3，13:24 那轮），比同一台机器上手敲的 `scan` 慢一些；两边都只报自己的用时。
-
----
-
-## 6. 数据怎么读
-
-`internal/meta` 是唯一的元数据入口：枚举 `GetLogicalDrives` 掩码里的盘符，定位当前用户 SID 名下的
-`$Recycle.Bin\<SID>`，按 `$I` 文件的写入时间排序后决定是否截断（`--max-scan`），再把 `$I`/`$R`
-配对成条目。`internal/parts` 只吃条目列表，产出 `bounds`（时间边界）和 `parts`（分区，含编号），
-不碰文件系统。所以「换个分组维度重排编号」不需要重新扫描回收站。
-
----
-
-## 7. 测试
-
-`go test -count=1 ./...`：**73 个顶层用例 + 75 个子用例**，全绿；`go vet ./...` 与
-`gofmt -l internal/` 干净。分布与覆盖点：
-
-| 包 | 顶层用例 | 主要覆盖 |
-| --- | --- | --- |
-| `internal/cli` | 12 | 默认值（含 `--max-scan` 50000）、十一种选项写法解析、位置参数、shell 分行与继承快照目录、无快照时的退出码、EOF 干净退出、提示符内容 |
-| `internal/engine` | 10 | 建快照的参数回写与空回收站、`SortedParts` 的 `--alive` 剔除已删完、`SelectedParts` 按 positions 重算大小与前缀收窄、`MatchPrefix` 忽略大小写、`DeleteOne` 单文件与目录树、保险丝拦下时一条都不动 / 正好等于上限时不拦、删完标记快照并逐笔记账本、`-v` 逐条回报 |
-| `internal/gui` | 13 | 表头排序的 9/6 列比较与并列退到编号、同一列排两次结果一致、勾选按编号记所以重排后不漂、Shift 范围勾选（含锚点不在视图时不连选）、没按 Shift 不连选、换视图清空勾选并复位排序；【全选】跳过已删完的分区、【清空勾选】回报撤销了几个、「桶内分组」取哪个值时该显示哪两项参数（`dir` 才用目录层级、`prefix`/`token` 才用前缀长度，`ext` 两个都不用）与 `parts.GroupKey` 的口径一致、删除按钮文字带出分区数与条目数、确认框只列前 20 个编号（否则对话框撑爆屏幕）、「按时间分批」下拉 16 项的写法全部能被 `parts.ParseSpec` 接受且最后一项确实走手填框（含留空回落、index=-1 回落）、「只看未删完」在无可隐藏分区时解释行数为何不变 |
-| `internal/meta` | 12 | `$I` v1/v2 头解析、超长尾部的损坏判定、display 取名、`$I`/`$R` 配对与异常记录、`--max-scan` 截断与各盘计数、空目录、FILETIME 换算往返，外加与 `testdata/py_meta.json` 的逐字段比对（含 4 个不可表示时间的用例） |
-| `internal/parts` | 12 | 时间桶写法接受/拒绝、分钟级边界对齐、断点边界覆盖全体、日历月桶跨月、分区内排序、标签与实际内容相符、损坏条目单独成组、目录分组同名合并，加上与 `testdata/py_parts.json` 的 49 份配置逐字段比对，以及把机器时区换成 UTC 再全量比一遍（比对钉在样例自己的时区上，不跟 runner 走） |
-| `internal/store` | 8 | 读写往返、缺文件/坏 JSON 的报错文案、快照文件的字段名与类型口径、`GroupCol`/`AliveLeft`、全量清单 CSV、账本表头与追加、`--drives` 解析、默认快照目录是当前目录的 `.rbm` |
-| `internal/tty` | 6 | 字节数人话、东亚宽度算列、截断、表格排版，另两项是补位与编号区间 `1-5,8-10,16` 的解析与越界 |
-
-测试只用自建的假 `$I` 文件和临时目录：假回收站走 `meta.BinDir{Drive:"Z",Path:tmp}` 这类注入，
-不经命令行（`--drives` 只认真实盘符），所以永远不会删到真实条目，也不会覆盖谁的 `.rbm`。
-`internal/gui` 的用例更窄：只直接调模型的排序/勾选方法和几个纯函数（按钮文案、下拉写法表与
-`parts.ParseSpec` 的一致性、编号简报、筛选解释、分组方式到参数显隐的映射），既不建窗口也不碰文件。
-
-`internal/{meta,parts,store}/testdata/` 下的 `py_*.json` 是三份**合成数据黄金样例**（假路径、固定
-种子，不含任何真实回收站内容），`meta` 的样例还配了 `testdata/isample/` 里 15 个 `$I` 原件，Go
-测试读同一批字节逐字段比对。测试只读这些 JSON/`$I` 文件本身，**`go test` 全程不需要 Python，
-也不依赖本仓库之外的任何东西**。样例里的日期串是**打快照那台机器**（UTC+8）的本地时刻，
-所以时区相关的比对不能跟着 runner 的时区走：`py_parts.json` 用样例自带的 `(epoch, deleted_at)`
-反推出偏移（`parts_test.go` 的 `fixtureZone`，当前这份 1400 条全部指向 +28800）并把
-`meta.LocalTZ` 钉住再跑，另有一条用例把机器时区换成 UTC 复现 CI 的场景；`py_meta.json` 里则直接
-记了生成时的偏移（`local_utc_offset_now`），比对测试发现它和当前时区不一致就跳过时区相关断言。
-
-同目录的 `regen_py_*.py` 是这三份样例最初生成时用的脚本，它们会把仓库外的
-`../../../../recycle_manager` 加进 `sys.path` 再 import 那个实现的模块 —— 那套代码**不在本仓库**，
-所以克隆下来的人跑不了这些脚本，也不需要跑。只有在原参考实现还在上述相对位置时才可能重新生成，
-而重跑会覆写 `py_*.json` 和 `isample/`（`regen_py_meta.py` 里有 `shutil` 清理），真要再生成请先
-确认这三份文件在当前测试里仍然是绿的。
-
----
-
-## 8. 已知限制
-
-- 只看当前用户 SID 名下的 `$Recycle.Bin\<SID>`，不处理别的 SID 目录，也不处理 `$R` 缺 `$I` 的孤儿
-  （这类会在异常记录里点名，本次不动）。
-- 盘符来自 `GetLogicalDrives` 的 A–Z 掩码；`--drives` 只接受真实存在的盘符字母。
-- 时间分区按本机时区渲染。Go 侧是启动时的固定偏移，跨夏令时的历史条目会被按当前偏移解释
-  （见 §5 第 3 条）。
-- 编号只在当前快照内有效：重新扫描会按当时内容重新编号，已删完的条目不会再出现。
-- 单次扫描默认最多 5 万条，超出时只取最老的那些建快照，并把「共多少、取了少、各盘已扫/总数、
-  两条继续办法」写清楚，绝不静默丢弃；`--max-scan 0` 为不限。
-- 删除是永久的：直接抹掉 `$R` 数据与 `$I` 元数据，不经过回收站，删了就没了。请配合
-  【预览删除】/`--dry-run` 和「删除保险丝」/`--max` 使用，明细永远在 `scan_list.csv`，
-  每一笔结果都在 `ledger.csv`。
+- Windows only; current user's SID only; drive letters come from the `GetLogicalDrives` mask.
+- Partition ids are valid **within the current snapshot only** — a rescan renumbers.
+- Time buckets render in the machine's local offset captured at startup, so items deleted across a DST
+  boundary are interpreted with today's offset.
+- A scan stops at `--max-scan` (default 50,000) and keeps the **oldest** items; it always prints how
+  many existed, how many it took, and per-drive progress — nothing is silently dropped. Use
+  `--max-scan 0` for no cap.
+- Deletion is permanent (see the warning above).
+- Two interface languages, no more: Chinese (default) and English. The three `docs/` guides are
+  Chinese-only, and lines already written to the GUI's activity log keep the language they were written
+  in (see [Language](#language)).
+- No `LICENSE` file is committed in this repository yet.

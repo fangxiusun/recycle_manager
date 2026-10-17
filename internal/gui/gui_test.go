@@ -6,8 +6,10 @@ import (
 
 	"github.com/lxn/walk"
 
+	"rbm/internal/i18n"
 	"rbm/internal/meta"
 	"rbm/internal/parts"
+	"rbm/internal/tty"
 )
 
 func partFixture(pids ...int) *partModel {
@@ -244,31 +246,74 @@ func TestBriefIDsKeepsDialogWidthSane(t *testing.T) {
 
 func TestBucketDropdownMatchesKernelGrammar(t *testing.T) {
 	// 下拉里每一项的写法都必须是 parts.ParseSpec 认得的；界面不能给出一个扫不动的选项。
-	if len(bucketValues) != len(bucketDisplay) {
-		t.Fatalf("写法表和文字表长度不一致: %d vs %d", len(bucketValues), len(bucketDisplay))
+	list := bucketDisplay()
+	if len(bucketValues) != len(list) {
+		t.Fatalf("写法表和文字表长度不一致: %d vs %d", len(bucketValues), len(list))
 	}
 	for i, v := range bucketValues {
 		if bucketIsCustom(i) {
 			continue // 「自定义」那项不给固定写法，值来自手填框
 		}
 		if _, err := parts.ParseSpec(v); err != nil {
-			t.Errorf("下拉第 %d 项 %q（%s）内核认不得: %v", i, v, bucketDisplay[i], err)
+			t.Errorf("下拉第 %d 项 %q（%s）内核认不得: %v", i, v, list[i], err)
 		}
 	}
-	if !bucketIsCustom(len(bucketDisplay) - 1) {
-		t.Errorf("最后一项得是「自定义」，否则专业用户没地方手填：%q", bucketDisplay[len(bucketDisplay)-1])
+	if !bucketIsCustom(len(list) - 1) {
+		t.Errorf("最后一项得是「自定义」，否则专业用户没地方手填：%q", list[len(list)-1])
 	}
 	if got := bucketToken(0, ""); got != "" {
 		t.Errorf("默认那项该传空串（= 自动找删除空档），实得 %q", got)
 	}
-	if got := bucketToken(len(bucketDisplay)-1, "  daily "); got != "daily" {
+	if got := bucketToken(len(list)-1, "  daily "); got != "daily" {
 		t.Errorf("自定义该取手填文本并去掉首尾空格，实得 %q", got)
 	}
-	if got := bucketToken(len(bucketDisplay)-1, "   "); got != "" {
+	if got := bucketToken(len(list)-1, "   "); got != "" {
 		t.Errorf("自定义留空该回落到默认，实得 %q", got)
 	}
 	if got := bucketToken(-1, "daily"); got != "" {
 		t.Errorf("控件还没建好（index = -1）时该按默认，实得 %q", got)
+	}
+}
+
+func TestDisplayListsFollowLanguage(t *testing.T) {
+	before := i18n.Get()
+	t.Cleanup(func() { i18n.Set(before) })
+
+	// 显示文本表可以随语言整组换掉，但顺序和个数必须跟 values 表对齐，
+	// 否则下拉第 i 项会把「每 15 分钟」的文案配到「每 1 天」的写法上。
+	for _, lang := range []i18n.Lang{i18n.Zh, i18n.En} {
+		i18n.Set(lang)
+		if len(byDisplay()) != len(byValues) {
+			t.Errorf("%s：分组显示表 %d 项 / 写法表 %d 项", lang, len(byDisplay()), len(byValues))
+		}
+		if len(levelDisplay()) != len(levelValues) {
+			t.Errorf("%s：层级显示表 %d 项 / 写法表 %d 项", lang, len(levelDisplay()), len(levelValues))
+		}
+		if len(bucketDisplay()) != len(bucketValues) {
+			t.Errorf("%s：分批显示表 %d 项 / 写法表 %d 项", lang, len(bucketDisplay()), len(bucketValues))
+		}
+		for _, d := range append(append(byDisplay(), levelDisplay()...), bucketDisplay()...) {
+			if strings.TrimSpace(d) == "" {
+				t.Errorf("%s：显示表里有空白项", lang)
+			}
+		}
+	}
+
+	i18n.Set(i18n.Zh)
+	zhBucket, zhBy := bucketDisplay(), byDisplay()
+	i18n.Set(i18n.En)
+	enBucket, enBy := bucketDisplay(), byDisplay()
+	if zhBy[0] == enBy[0] {
+		t.Errorf("换语言后分组文字没变：%q", enBy[0])
+	}
+	for i := range zhBucket {
+		if zhBucket[i] == enBucket[i] {
+			t.Errorf("第 %d 项分批文字两侧相同：%q", i, enBucket[i])
+		}
+	}
+	// 档位个数不随语言变，「自定义」始终落在最后一项。
+	if !bucketIsCustom(len(enBucket) - 1) {
+		t.Error("英文下最后一项不再是「自定义」")
 	}
 }
 
@@ -292,4 +337,116 @@ func TestAliveFilterTextExplainsWhyRowsDidNotChange(t *testing.T) {
 			t.Errorf("关闭时缺 %q：%q", want, off)
 		}
 	}
+}
+
+// 下面这一组是双语改造的守卫：界面切成英文之后，「数字还在不在」是唯一的硬指标。
+// 文案措辞可以改，但 120 个分区、50000 上限这类规模一旦在翻译里丢了，
+// 用户就看不出这一轮到底动了多少东西。
+
+func withLang(t *testing.T, l i18n.Lang, run func()) {
+	t.Helper()
+	before := i18n.Get()
+	t.Cleanup(func() { i18n.Set(before) })
+	i18n.Set(l)
+	run()
+}
+
+func mustHave(t *testing.T, label, text string, wants ...string) {
+	t.Helper()
+	for _, w := range wants {
+		if !strings.Contains(text, w) {
+			t.Errorf("%s 缺 %q：%q", label, w, text)
+		}
+	}
+}
+
+func TestScaleNumbersSurviveInBothLanguages(t *testing.T) {
+	for _, l := range []i18n.Lang{i18n.Zh, i18n.En} {
+		withLang(t, l, func() {
+			none := deleteButtonText(0, 0)
+			if !strings.Contains(none, "⚠") {
+				t.Errorf("%s：没勾选时删除按钮要把危险态说出来：%q", l, none)
+			}
+			// 「未勾选 / nothing ticked」两侧都得有，否则空勾选时看着像能删。
+			if none == deleteButtonText(2, 3) {
+				t.Errorf("%s：没勾选和勾了 2 个的按钮文案相同：%q", l, none)
+			}
+			some := deleteButtonText(294, 20255)
+			mustHave(t, string(l)+"/删除按钮", some, "294", "20255")
+
+			mustHave(t, string(l)+"/筛选-无变化", aliveFilterText(true, 120, 120), "120")
+			mustHave(t, string(l)+"/筛选-有隐藏", aliveFilterText(true, 120, 100), "120", "20", "100")
+			mustHave(t, string(l)+"/筛选-关闭", aliveFilterText(false, 120, 120), "120")
+
+			long := briefIDs(makeIDs(120), 20)
+			mustHave(t, string(l)+"/编号摘要", long, "1", "20", "120")
+			if strings.Contains(long, "21") {
+				t.Errorf("%s：第 21 个编号不该整串写出来：%q", l, long)
+			}
+			mustHave(t, string(l)+"/超限提示", overflowText(&meta.Overflow{
+				Total: 60000, Taken: 50000,
+				ByDrive: map[string][2]int{"C:": {30000, 40000}, "D:": {20000, 20000}},
+			}), "60000", "50000", "10000", "70000", "C:", "D:")
+		})
+	}
+}
+
+func makeIDs(n int) []int {
+	out := make([]int, n)
+	for i := range out {
+		out[i] = i + 1
+	}
+	return out
+}
+
+func TestSummaryHeadersFitTheirColumns(t *testing.T) {
+	// tty.Table 会把每格截到列宽，表头也一样：英文表头一长就变成「Time ra…」，
+	// 日志里的统计表读起来像坏了。列宽是手调的中文字数，英文必须自己适配。
+	for _, l := range []i18n.Lang{i18n.Zh, i18n.En} {
+		withLang(t, l, func() {
+			for _, c := range summaryCols {
+				h := i18n.T(c.key)
+				if tty.WLen(h) > c.width {
+					t.Errorf("%s：表头 %q（宽 %d）超出列宽 %d，会被削成 %q",
+						l, h, tty.WLen(h), c.width, tty.Truncate(h, c.width))
+				}
+			}
+		})
+	}
+}
+
+func TestDeleteSummaryChineseUnchanged(t *testing.T) {
+	// 中文这一侧要逐字保持改造前的输出：表头、量词、分隔竖线一个都不许动，
+	// 否则老用户和黄金样例都会看到陌生的字。
+	withLang(t, i18n.Zh, func() {
+		chosen := []*parts.Part{
+			{PID: 3, Count: 2, Size: 2048, Label: "文档", TimeRange: "2026-10-01 10:00 ~ 10:15", IndexStart: 0, IndexEnd: 1},
+			{PID: 7, Count: 3, Size: 4096, Label: "其他", TimeRange: "2026-10-02 09:00 ~ 09:30", IndexStart: 2, IndexEnd: 4},
+		}
+		rows := [][]string{
+			{"3", "2026-10-01 10:00 ~ 10:15", "文档", "2", tty.Human(2048), "0-1"},
+			{"7", "2026-10-02 09:00 ~ 09:30", "其他", "3", tty.Human(4096), "2-4"},
+		}
+		want := "选中分区 2 个: 3,7\n" +
+			tty.Table([]string{"编号", "时间范围", "路径组/前缀组", "元素数", "大小", "index区间"},
+				rows, []int{4, 24, 44, 7, 9, 12}) +
+			"\n本次将永久删除 5 个条目，约 " + tty.Human(6144) + "（不可恢复）"
+		if got := (&app{}).deleteSummary(chosen); got != want {
+			t.Errorf("中文选中统计变了样：\n实得 %q\n要  %q", got, want)
+		}
+	})
+}
+
+func TestDeleteSummaryEnglishCarriesScale(t *testing.T) {
+	withLang(t, i18n.En, func() {
+		got := (&app{}).deleteSummary([]*parts.Part{
+			{PID: 3, Count: 1, Size: 2048, Label: "其他", TimeRange: "2026-10-01", IndexStart: 0, IndexEnd: 0},
+			{PID: 7, Count: 3, Size: 4096, Label: "文档", TimeRange: "2026-10-02", IndexStart: 1, IndexEnd: 3},
+		})
+		mustHave(t, "en/选中统计", got, "Selected 2 partitions: 3,7", "Time range",
+			"Path/prefix group", "Index range", "This will", "permanently delete 4 items")
+		if strings.Contains(got, "个") {
+			t.Errorf("英文输出里漏了中文量词：%q", got)
+		}
+	})
 }

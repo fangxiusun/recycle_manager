@@ -10,7 +10,7 @@ scan_list.csv
 ledger.csv
 
 # ---- Go 构建产物 ----
-# rsrc.syso 是 windres 从 rbm.rc + rbm.manifest 生成的（README §2 第 1 步）；
+# rsrc.syso 是 windres 从 rbm.rc + rbm.manifest 生成的（docs/构建与验证.md §2.2 第 1 步）；
 # rbm.rc 与 rbm.manifest 是源文件，必须提交，少了 manifest 一开界面就 TTM_ADDTOOL failed。
 *.exe
 *.syso

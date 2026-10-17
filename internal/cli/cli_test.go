@@ -8,9 +8,11 @@ import (
 	"strings"
 	"testing"
 
+	"rbm/internal/i18n"
 	"rbm/internal/meta"
 	"rbm/internal/parts"
 	"rbm/internal/store"
+	"rbm/internal/tty"
 )
 
 // 这一层只测「解析与派发」：命令行解析、位置参数、shell 的逐行派发。
@@ -346,5 +348,218 @@ func TestPrompt(t *testing.T) {
 	}
 	if !strings.Contains(got, "12:00:00") {
 		t.Errorf("提示符里的快照时间应当是时分秒: %q", got)
+	}
+}
+
+// ---------- 双语 ----------
+
+// withLang 临时切语言并在用例结束后还原：语言是全局的，不还原会让后面的中文断言全线失败。
+func withLang(t *testing.T, l i18n.Lang) {
+	t.Helper()
+	prev := i18n.Get()
+	i18n.Set(l)
+	t.Cleanup(func() { i18n.Set(prev) })
+}
+
+func TestSplitLangArgs(t *testing.T) {
+	cases := []struct {
+		name string
+		argv []string
+		lang string
+		want []string
+	}{
+		{"没有 --lang", []string{"parts"}, "", []string{"parts"}},
+		{"子命令前", []string{"--lang", "en", "parts"}, "en", []string{"parts"}},
+		{"子命令后", []string{"parts", "--lang", "en"}, "en", []string{"parts"}},
+		{"等号写法", []string{"--lang=en", "show", "1"}, "en", []string{"show", "1"}},
+		{"多个取第一个", []string{"--lang", "en", "--lang", "zh", "parts"}, "en", []string{"parts"}},
+		{"值缺失就丢掉", []string{"parts", "--lang"}, "", []string{"parts"}},
+		{"长选项名不误伤", []string{"parts", "--language", "en"}, "", []string{"parts", "--language", "en"}},
+		{"保留其它参数顺序", []string{"--lang", "zh", "show", "2", "--limit", "1"}, "zh",
+			[]string{"show", "2", "--limit", "1"}},
+	}
+	for _, c := range cases {
+		lang, rest := SplitLangArgs(c.argv)
+		if lang != c.lang {
+			t.Errorf("%s: --lang = %q，期望 %q", c.name, lang, c.lang)
+		}
+		if strings.Join(rest, "|") != strings.Join(c.want, "|") {
+			t.Errorf("%s: 摘掉 --lang 后 = %v，期望 %v", c.name, rest, c.want)
+		}
+	}
+}
+
+// --lang 落在子命令前后都要生效，且错误流也一起换语言。
+func TestLangFlagAffectsBothStreams(t *testing.T) {
+	withLang(t, i18n.Zh)
+	dir := t.TempDir()
+	a, _, errb := newApp("")
+	if code := a.main([]string{"parts", "--state-dir", dir}); code != 1 {
+		t.Fatalf("无快照时退出码 = %d，期望 1", code)
+	}
+	if !strings.Contains(errb.String(), "没有找到快照") {
+		t.Errorf("默认应当中文: %q", errb.String())
+	}
+
+	for _, argv := range [][]string{
+		{"--lang", "en", "parts", "--state-dir", dir},
+		{"--lang=en", "parts", "--state-dir", dir},
+	} {
+		i18n.Set(i18n.Zh) // 每轮都从中文起，验的才是 flag 本身
+		a, _, errb = newApp("")
+		if code := a.main(argv); code != 1 {
+			t.Fatalf("%v 退出码 = %d，期望 1", argv, code)
+		}
+		if !strings.Contains(errb.String(), "No snapshot at") {
+			t.Errorf("%v 应当出英文: %q", argv, errb.String())
+		}
+		// 一次调用里 flag 改的是全局语言，之后的输出保持英文（进程内不复原）
+		if i18n.Get() != i18n.En {
+			t.Errorf("%v 跑完之后语言应当停在英文，实得 %s", argv, i18n.Get())
+		}
+	}
+
+	// 认不出的写法不报错，按优先级往下退，最后中文。
+	i18n.Set(i18n.Zh)
+	a, _, errb = newApp("")
+	if code := a.main([]string{"--lang", "klingon", "parts", "--state-dir", dir}); code != 1 {
+		t.Fatalf("坏语言值不该改变退出码: %d", code)
+	}
+	if !strings.Contains(errb.String(), "没有找到快照") {
+		t.Errorf("--lang 认不出时应当退回中文: %q", errb.String())
+	}
+}
+
+// 会话里 --lang 随写随切，并且对后续行继续生效。
+func TestRunLineLangSwitchPersists(t *testing.T) {
+	withLang(t, i18n.Zh)
+	a, out, _ := newApp("")
+	a.inShell = true
+	a.sessStateDir = t.TempDir()
+	if code := a.runLine("parts\n"); code != 1 || !strings.Contains(out.String(), "没有找到快照") {
+		t.Fatalf("会话默认应当中文: code=%d out=%q", code, out.String())
+	}
+	out.Reset()
+	if code := a.runLine("parts --lang en\n"); code != 1 || !strings.Contains(out.String(), "No snapshot at") {
+		t.Errorf("会话里的 --lang 应当生效: code=%d out=%q", code, out.String())
+	}
+	if i18n.Get() != i18n.En {
+		t.Errorf("切完应当停在英文")
+	}
+	out.Reset()
+	if code := a.runLine("parts\n"); code != 1 || !strings.Contains(out.String(), "No snapshot at") {
+		t.Errorf("语言应当跨行保持: code=%d out=%q", code, out.String())
+	}
+	out.Reset()
+	// 认不出的语言值：不改语言，也不影响这一行的执行结果。
+	if code := a.runLine("parts --lang klingon\n"); code != 1 ||
+		!strings.Contains(out.String(), "No snapshot at") {
+		t.Errorf("坏语言值不该改变行为: code=%d out=%q", code, out.String())
+	}
+	if i18n.Get() != i18n.En {
+		t.Errorf("坏语言值不该改语言，实得 %s", i18n.Get())
+	}
+	out.Reset()
+	if code := a.runLine("parts --lang 中文\n"); code != 1 || !strings.Contains(out.String(), "没有找到快照") {
+		t.Errorf("--lang 应当认「中文」这种写法: code=%d out=%q", code, out.String())
+	}
+	out.Reset()
+	if code := a.runLine("quit\n"); code != quitSession {
+		t.Errorf("收尾：quit 仍应结束会话: %d", code)
+	}
+}
+
+// sampleState 造 n 个「每区一条」的快照：条目合计正好 n，方便盯单复数。
+func sampleState(n int) *store.State {
+	st := &store.State{Created: "2026-10-16 12:00:00", Params: store.Params{By: "dir"}}
+	for i := 0; i < n; i++ {
+		st.Items = append(st.Items, &meta.Item{Display: "a.txt", Size: 1024, Drive: "G"})
+		st.Parts = append(st.Parts, &parts.Part{
+			PID: i + 1, Count: 1, Size: 1024, Label: "G:/x", Drives: "G",
+			TimeRange: "2026-10-16 12:00", IndexStart: i + 1, IndexEnd: i + 1,
+			TopLabels: "a.txt(1)",
+		})
+	}
+	return st
+}
+
+// 英文有单复数、中文只有量词：两边都不能出现 "1 partitions" 这类写法。
+func TestPartStatsPluralForms(t *testing.T) {
+	withLang(t, i18n.Zh)
+	var buf bytes.Buffer
+	a := &app{out: &buf, err: &buf, in: bufio.NewReader(strings.NewReader(""))}
+	a.printParts(sampleState(1), false, "time")
+	zh := buf.String()
+	for _, want := range []string{"条目合计 1 个 / ", "分区 1 个  编号 1..1"} {
+		if !strings.Contains(zh, want) {
+			t.Errorf("中文统计行缺 %q:\n%s", want, zh)
+		}
+	}
+
+	buf.Reset()
+	withLang(t, i18n.En)
+	a.printParts(sampleState(1), false, "time")
+	en := buf.String()
+	for _, want := range []string{"Total 1 item /", "in 1 partition  ids 1..1"} {
+		if !strings.Contains(en, want) {
+			t.Errorf("英文统计行缺 %q:\n%s", want, en)
+		}
+	}
+	for _, bad := range []string{"1 items", "1 partitions"} {
+		if strings.Contains(en, bad) {
+			t.Errorf("英文单数写成了 %q:\n%s", bad, en)
+		}
+	}
+
+	buf.Reset()
+	a.printParts(sampleState(3), false, "time")
+	en = buf.String()
+	for _, want := range []string{"Total 3 items /", "in 3 partitions"} {
+		if !strings.Contains(en, want) {
+			t.Errorf("英文复数缺 %q:\n%s", want, en)
+		}
+	}
+}
+
+// 表头宽度跟着语言换：英文表头更长，沿用中文宽度会被截成 "Dr…"。
+func TestTableWidthsFollowLanguage(t *testing.T) {
+	withLang(t, i18n.Zh)
+	zhParts, zhItems := partsWidths(), itemWidths()
+	withLang(t, i18n.En)
+	enParts, enItems := partsWidths(), itemWidths()
+
+	if len(zhParts) != len(enParts) || len(zhItems) != len(enItems) {
+		t.Fatalf("宽度列数必须和表头一一对应: parts %d/%d items %d/%d",
+			len(zhParts), len(enParts), len(zhItems), len(enItems))
+	}
+	st := sampleState(1)
+	headers := partsHeaders(st)
+	if len(headers) != len(enParts) {
+		t.Fatalf("分区表头 %d 列，宽度 %d 列", len(headers), len(enParts))
+	}
+	// 盘 / Drive：中文一列宽 4，英文要 5 才不截断
+	if zhParts[6] >= enParts[6] {
+		t.Errorf("英文「盘」列不该比中文窄: zh=%d en=%d", zhParts[6], enParts[6])
+	}
+	if enItems[3] <= zhItems[3] {
+		t.Errorf("英文「盘」列该更宽: zh=%d en=%d", zhItems[3], enItems[3])
+	}
+	for _, c := range []struct {
+		lang i18n.Lang
+		want string
+	}{
+		{i18n.Zh, "盘"}, {i18n.En, "Drive"},
+	} {
+		withLang(t, c.lang)
+		line := strings.Split(tty.Table(partsHeaders(st), partsRows(st.Parts), partsWidths()), "\n")[0]
+		if !strings.Contains(line, c.want) {
+			t.Errorf("%s 表头应当完整出现 %q: %q", c.lang, c.want, line)
+		}
+	}
+	// 反过来验一次：英文表头硬套中文宽度就会被截断——这正是宽度要跟着语言换的原因。
+	withLang(t, i18n.En)
+	truncated := strings.Split(tty.Table(partsHeaders(st), partsRows(st.Parts), zhParts), "\n")[0]
+	if strings.Contains(truncated, "Drive") {
+		t.Errorf("英文表头套中文宽度居然没截断，这条护栏没意义: %q", truncated)
 	}
 }

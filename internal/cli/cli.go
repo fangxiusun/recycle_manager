@@ -1,11 +1,13 @@
 // Package cli 是 rbm 的命令行外壳：scan/parts/show/delete/shell 五个子命令，
-// 文案、表头、退出码都对齐 Python 版，界面只做展示，判定都走 internal/engine。
+// 表头、退出码都对齐 Python 版，界面只做展示，判定都走 internal/engine。
+// 所有面客文案取自 internal/i18n，默认中文，--lang en 或 RBM_LANG 切英文。
 package cli
 
 import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -15,11 +17,36 @@ import (
 	"strings"
 
 	"rbm/internal/engine"
+	"rbm/internal/i18n"
 	"rbm/internal/meta"
 	"rbm/internal/parts"
 	"rbm/internal/store"
 	"rbm/internal/tty"
 )
+
+// SplitLangArgs 把 --lang zh|en / --lang=zh 从参数里摘出来，剩下原样返回。
+// 位置随意：rbm --lang en scan 与 rbm scan --lang en 都能认，多个 --lang 以第一个为准。
+// 摘干净是必要的，否则子命令的选项表里没有 lang，会当成「无法识别的选项」。
+func SplitLangArgs(argv []string) (string, []string) {
+	lang := ""
+	out := make([]string, 0, len(argv))
+	for i := 0; i < len(argv); i++ {
+		switch tok := argv[i]; {
+		case tok == "--lang":
+			if i+1 < len(argv) && lang == "" {
+				lang = argv[i+1]
+			}
+			i++
+		case strings.HasPrefix(tok, "--lang="):
+			if lang == "" {
+				lang = strings.TrimPrefix(tok, "--lang=")
+			}
+		default:
+			out = append(out, tok)
+		}
+	}
+	return lang, out
+}
 
 // 与 Python argparse 一致的单位置默认值
 var defaults = struct {
@@ -80,35 +107,6 @@ func Main(argv []string) int {
 	return a.main(argv)
 }
 
-var rootHelp = `回收站分批管理工具（分区编号 → 查看 → 批量删除）
-
-用法: rbm <子命令> [选项]
-
-子命令:
-  scan    扫描回收站并按「时间桶 × 原路径目录」分区编号，写出统计
-  parts   重列已扫描快照的分区统计
-  show    查看某个编号分区内的元素列表（index 区间）
-  delete  按编号（如 1-5,8-10,16）分批永久删除分区内容，默认 dry-run
-  shell   进入交互 shell：启动即 scan，之后的 show/delete 复用同一份内存快照
-
-不带任何参数直接运行 rbm.exe 会打开图形界面。用 rbm <子命令> -h 看该命令的选项。`
-
-const partitionHelp = `  --bucket 文本           时间桶。不填=按删除时间断点自动切区（gap）。也可指定等宽：
-                          minutely/hourly/daily/weekly/monthly/30m/15m/1h/3d/2mo，
-                          或 gap:5m 表示只在间隔>=5分钟处断区，auto=自动选最细可用等宽
-  --max-buckets N         时间桶数上限：gap 模式下取最大的若干个断点，auto 模式下选不超过该数的
-                          最细等宽粒度（默认 12）
-  --by dir|prefix|ext|token  桶内分组维度：dir 按原路径所在目录（默认）/prefix 文件名字符前缀/
-                          ext 扩展名/token 文件名首段
-  --dir-level N|full      dir 分组取原路径末尾几段：1 只看所在目录名（合并同类批），2 默认
-                          （上级目录+目录，可区分每次构建），3 更具体，full 用完整路径
-  --prefix-len N          prefix/token 模式的字符数（默认 3）
-  --max-parts N           分区总数上限（默认 120；调小会把小组并成「其他」，调大保留更多具体路径）
-  --min-count N           少于该元素数的分组并入「其他」（默认 5）
-  --drives C,G            限定盘符，逗号分隔
-  --max-scan N            一次最多扫描多少个条目（默认 50000，0 = 不限）。回收站更大时只取最老的
-                          N 个建快照并明确提示，不会静默丢弃；删完再 scan 会继续处理剩下的`
-
 // 每个子命令接受的 flag 名 -> 是否需要取值
 var flagSpecs = map[string]map[string]bool{
 	"scan": {
@@ -134,17 +132,25 @@ var flagSpecs = map[string]map[string]bool{
 var boolAliases = map[string]string{"v": "verbose"}
 
 func (a *app) main(argv []string) int {
+	// 启动时 main.go 已经摘过一次 --lang；这里再摘一次，Direct 调 Main 的调用方
+	// （测试、被脚本直接 exec）也能用同一个写法切语言。
+	if lang, rest := SplitLangArgs(argv); lang != "" {
+		if l, ok := i18n.Parse(lang); ok {
+			i18n.Set(l)
+		}
+		argv = rest
+	}
 	if len(argv) == 0 {
-		fmt.Fprintln(a.err, "用法: rbm <子命令> [选项]，或 rbm --help")
+		fmt.Fprintln(a.err, i18n.T("cli.usage-hint"))
 		return 2
 	}
 	head := argv[0]
 	if head == "--help" || head == "-h" || head == "help" {
-		fmt.Fprintln(a.out, rootHelp)
+		fmt.Fprintln(a.out, i18n.T("cli.help.root"))
 		return 0
 	}
 	if _, ok := flagSpecs[head]; !ok {
-		fmt.Fprintf(a.err, "rbm: 无法识别的子命令 %s（可用: scan/parts/show/delete/shell）\n", head)
+		fmt.Fprintln(a.err, i18n.Tf("cli.bad-subcommand", head))
 		return 2
 	}
 	opts, pos, help, err := parseFlags(head, argv[1:])
@@ -180,21 +186,23 @@ func (a *app) dispatch(cmd string, opts *options) int {
 }
 
 func commandHelp(cmd string) string {
-	head := "用法: rbm " + cmd
+	head := i18n.T("cli.usage-prefix")
+	usage := func(key, args string) string {
+		return head + i18n.T(key) + "\n\n" + i18n.T(args)
+	}
 	switch cmd {
 	case "scan":
-		return head + " [选项]\n\n扫描回收站并按「时间桶 × 原路径目录」分区编号，写出统计。\n\n选项:\n" +
-			partitionHelp + "\n  --state-dir 目录        快照目录（默认 当前目录\\.rbm）"
+		return usage("cli.usage.scan", "cli.desc.scan") + "\n\n" +
+			i18n.T("cli.help.options-heading") + "\n" +
+			i18n.T("cli.help.partition-opts") + "\n" + i18n.T("cli.help.state-dir")
 	case "parts":
-		return head + " [--alive] [--sort time|size|count] [--state-dir 目录]\n\n重列已扫描快照的分区统计表。"
+		return usage("cli.usage.parts", "cli.desc.parts")
 	case "show":
-		return head + " <编号> [--start N] [--end N] [--prefix 串] [--limit N] [--tail] [--local]\n\n" +
-			"查看某编号分区内的元素列表。--limit 0 全部显示。"
+		return usage("cli.usage.show", "cli.desc.show")
 	case "delete":
-		return head + " <编号区间> [--dry-run|--yes] [--prefix 串] [--max N] [--sample N] [--every N] [-v]\n\n" +
-			"按编号分批永久删除（默认 dry-run，只预览不动手）。"
+		return usage("cli.usage.delete", "cli.desc.delete")
 	case "shell":
-		return head + " [scan 的全部选项] [--no-scan]\n\n进入交互 shell：启动即 scan，之后的 show/delete 复用同一份内存快照，编号不会漂。"
+		return usage("cli.usage.shell", "cli.desc.shell")
 	}
 	return head
 }
@@ -203,17 +211,17 @@ func fillPositional(cmd string, pos []string, opts *options) error {
 	switch cmd {
 	case "show":
 		if len(pos) != 1 {
-			return fmt.Errorf("需要且只需要一个编号参数，例如: rbm show 12")
+			return errors.New(i18n.T("cli.need-pid"))
 		}
 		opts.pid = pos[0]
 	case "delete":
 		if len(pos) != 1 {
-			return fmt.Errorf("需要编号区间参数，例如: rbm delete 1-5,8-10,16")
+			return errors.New(i18n.T("cli.need-pids"))
 		}
 		opts.pids = pos[0]
 	default:
 		if len(pos) > 0 {
-			return fmt.Errorf("多余的参数: %s", strings.Join(pos, " "))
+			return errors.New(i18n.Tf("cli.extra-args", strings.Join(pos, " ")))
 		}
 	}
 	if opts.stateDir == "" {
@@ -266,24 +274,24 @@ func parseFlags(cmd string, argv []string) (*options, []string, bool, error) {
 		}
 		needsValue, ok := spec[name]
 		if !ok {
-			return nil, nil, false, fmt.Errorf("无法识别的选项: --%s", name)
+			return nil, nil, false, errors.New(i18n.Tf("cli.bad-flag", name))
 		}
 		if !needsValue {
 			if hasValue {
-				return nil, nil, false, fmt.Errorf("选项 --%s 不接受取值", name)
+				return nil, nil, false, errors.New(i18n.Tf("cli.flag-no-value", name))
 			}
 			setBool(opts, name, true)
 			continue
 		}
 		if !hasValue {
 			if i+1 >= len(argv) {
-				return nil, nil, false, fmt.Errorf("选项 --%s 需要一个取值", name)
+				return nil, nil, false, errors.New(i18n.Tf("cli.flag-need-value", name))
 			}
 			i++
 			value = argv[i]
 		}
 		if err := setString(opts, name, value); err != nil {
-			return nil, nil, false, fmt.Errorf("选项 --%s 的取值无法识别: %s", name, value)
+			return nil, nil, false, errors.New(i18n.Tf("cli.flag-bad-value", name, value))
 		}
 	}
 	return opts, pos, help, nil
@@ -327,7 +335,7 @@ func setString(o *options, name, v string) error {
 		o.bucket = v
 	case "by":
 		if v != "dir" && v != "prefix" && v != "ext" && v != "token" {
-			return fmt.Errorf("无效取值")
+			return errors.New(i18n.T("cli.invalid-value"))
 		}
 		o.by = v
 	case "dir-level":
@@ -338,7 +346,7 @@ func setString(o *options, name, v string) error {
 		o.stateDir = v
 	case "sort":
 		if v != "time" && v != "size" && v != "count" {
-			return fmt.Errorf("无效取值")
+			return errors.New(i18n.T("cli.invalid-value"))
 		}
 		o.sort = v
 	case "prefix":
@@ -356,7 +364,7 @@ func setString(o *options, name, v string) error {
 		}
 		o.end = &n
 	default:
-		return fmt.Errorf("未知选项")
+		return errors.New(i18n.T("cli.unknown-option"))
 	}
 	return nil
 }
@@ -421,6 +429,46 @@ func jsonKV(k, v string) string {
 	return fmt.Sprintf("%q: %s", k, strings.TrimSpace(buf.String()))
 }
 
+// 表头与列宽成对给出：英文列名普遍比中文长（「盘」占 3 列 vs "Drive" 占 5 列），
+// 沿用中文那套宽度会把表头截成 "Dr…"，所以宽度跟着语言一起换。
+func partsHeaders(st *store.State) []string {
+	return []string{
+		i18n.T("cli.th.pid"), i18n.T("cli.th.range"), st.GroupCol(), i18n.T("cli.th.count"),
+		i18n.T("cli.th.size"), i18n.T("cli.th.index"), i18n.T("cli.th.drive"),
+		i18n.T("cli.th.left"), i18n.T("cli.th.top"),
+	}
+}
+
+func partsWidths() []int {
+	if i18n.IsEn() {
+		return []int{4, 24, 44, 7, 9, 12, 5, 4, 26}
+	}
+	return []int{4, 24, 44, 7, 9, 12, 4, 4, 26}
+}
+
+func itemWidths() []int {
+	if i18n.IsEn() {
+		return []int{7, 19, 9, 5, 28, 60}
+	}
+	return []int{7, 19, 9, 3, 28, 60}
+}
+
+func partsRows(list []*parts.Part) [][]string {
+	rows := make([][]string, 0, len(list))
+	for _, p := range list {
+		rest := "-"
+		if p.Deleted > 0 {
+			rest = fmt.Sprintf("%d/%d", p.Count-p.Deleted, p.Count)
+		}
+		rows = append(rows, []string{
+			strconv.Itoa(p.PID), p.TimeRange, p.Label, strconv.Itoa(p.Count),
+			tty.Human(float64(p.Size)), fmt.Sprintf("%d-%d", p.IndexStart, p.IndexEnd),
+			p.Drives, rest, p.TopLabels,
+		})
+	}
+	return rows
+}
+
 func (a *app) printParts(st *store.State, alive bool, sortKey string) {
 	chosen := engine.SortedParts(st, sortKey, alive)
 	total := 0
@@ -429,34 +477,21 @@ func (a *app) printParts(st *store.State, alive bool, sortKey string) {
 		total += p.Count
 		size += p.Size
 	}
-	a.printf("快照时间 %s  参数 %s\n", st.Created, paramsJSON(st.Params))
-	numbered := fmt.Sprintf("编号 1..%d", len(st.Parts))
+	a.printf("%s\n", i18n.Tf("cli.parts.line1", st.Created, paramsJSON(st.Params)))
+	numbered := i18n.Tf("cli.parts.numbered", len(st.Parts))
 	if len(st.Parts) == 0 {
-		numbered = "没有分区"
+		numbered = i18n.T("cli.parts.no-parts")
 	}
-	a.printf("条目合计 %d 个 / %s  分区 %d 个  %s\n", total, tty.Human(float64(size)), len(st.Parts), numbered)
-	headers := []string{"编号", "时间范围", st.GroupCol(), "元素数", "大小", "index区间", "盘", "剩余", "组内构成/示例"}
-	widths := []int{4, 24, 44, 7, 9, 12, 4, 4, 26}
-	rows := make([][]string, 0, len(chosen))
-	for _, p := range chosen {
-		left := p.Count - p.Deleted
-		rest := "-"
-		if p.Deleted > 0 {
-			rest = fmt.Sprintf("%d/%d", left, p.Count)
-		}
-		rows = append(rows, []string{
-			strconv.Itoa(p.PID), p.TimeRange, p.Label, strconv.Itoa(p.Count),
-			tty.Human(float64(p.Size)), fmt.Sprintf("%d-%d", p.IndexStart, p.IndexEnd),
-			p.Drives, rest, p.TopLabels,
-		})
-	}
-	a.printf("%s\n", tty.Table(headers, rows, widths))
+	a.printf("%s\n", i18n.Tf("cli.parts.line2", total, i18n.Noun(total, "个", "item", "items"),
+		tty.Human(float64(size)), len(st.Parts), i18n.Noun(len(st.Parts), "个", "partition", "partitions"),
+		numbered))
+	a.printf("%s\n", tty.Table(partsHeaders(st), partsRows(chosen), partsWidths()))
 }
 
 func (a *app) printItems(pairs []pair, header string) {
 	a.printf("%s\n", header)
-	headers := []string{"index", "删除时间", "大小", "盘", "文件名", "原路径"}
-	widths := []int{7, 19, 9, 3, 28, 60}
+	headers := []string{"index", i18n.T("cli.th.deleted"), i18n.T("cli.th.size"),
+		i18n.T("cli.th.drive"), i18n.T("cli.th.name"), i18n.T("cli.th.orig")}
 	rows := make([][]string, 0, len(pairs))
 	for _, pr := range pairs {
 		rows = append(rows, []string{
@@ -464,7 +499,7 @@ func (a *app) printItems(pairs []pair, header string) {
 			pr.item.Drive, pr.item.Display, pr.item.OrigPath,
 		})
 	}
-	a.printf("%s\n", tty.Table(headers, rows, widths))
+	a.printf("%s\n", tty.Table(headers, rows, itemWidths()))
 }
 
 // ---------- 子命令 ----------
@@ -506,7 +541,7 @@ func (a *app) cmdScan(o *options) int {
 	}
 	a.printParts(st, false, "time")
 	if len(st.Issues) > 0 {
-		a.printf("\n异常记录 %d 条（详见 scan_list.csv 同目录状态文件），示例:\n", len(st.Issues))
+		a.printf("\n%s\n", i18n.Tf("cli.scan.issues", len(st.Issues)))
 		for i, line := range st.Issues {
 			if i == 5 {
 				break
@@ -514,24 +549,24 @@ func (a *app) cmdScan(o *options) int {
 			a.printf("  - %s\n", line)
 		}
 	}
-	a.printf("\n完整清单已写出: %s\n", listPath)
+	a.printf("\n%s\n", i18n.Tf("cli.scan.list-written", listPath))
 	if snap.Overflow != nil {
-		a.println("注意: 本次快照只覆盖最老的一部分条目，删完这批再 scan 会拿到剩下的内容。")
+		a.println(i18n.T("cli.scan.overflow-note"))
 	}
 	if len(st.Parts) == 0 {
-		a.println("回收站里当前用户没有对象（0 个条目），这就是扫描完成的结果，不是错误。")
-		a.println("没有可删的分区；清空回收站之后重新 scan 会拿到同样的 0。")
+		a.println(i18n.T("cli.scan.empty-1"))
+		a.println(i18n.T("cli.scan.empty-2"))
 		return 0
 	}
-	a.println("下一步: show <编号> 查看内容；delete <编号区间> 分批删除（默认 dry-run，加 --yes 才真删）")
+	a.println(i18n.T("cli.scan.next-step"))
 	return 0
 }
 
 func (a *app) println(s string) { a.printf("%s\n", s) }
 
 func (a *app) printOverflow(ov *meta.Overflow) {
-	a.printf("! 回收站共有 %d 个条目，超过本次 --max-scan %d，快照只建了其中最老的 %d 个"+
-		"（按 $I 写入时间排序，约等于删除时间），另有 %d 个未纳入。\n", ov.Total, ov.Taken, ov.Taken, ov.Total-ov.Taken)
+	a.printf("%s\n", i18n.Tf("cli.overflow.head", ov.Total,
+		i18n.Noun(ov.Total, "个条目", "item", "items"), ov.Taken, ov.Taken, ov.Total-ov.Taken))
 	drives := make([]string, 0, len(ov.ByDrive))
 	for d := range ov.ByDrive {
 		drives = append(drives, d)
@@ -542,10 +577,10 @@ func (a *app) printOverflow(ov *meta.Overflow) {
 		v := ov.ByDrive[d]
 		cells[i] = fmt.Sprintf("%s %d/%d", d, v[0], v[1])
 	}
-	a.printf("  各盘 已扫/总数: %s\n", strings.Join(cells, ", "))
-	a.printf("  两种继续办法:\n")
-	a.printf("    A) 一次看全 —— 把上限调到总数以上再重扫: scan --max-scan %d\n", (ov.Total/10000+1)*10000)
-	a.printf("    B) 分批推进（推荐）—— 先删掉本快照里的分区，再重新 scan，剩下的条目会自动进新快照并重新编号\n")
+	a.printf("%s\n", i18n.Tf("cli.overflow.drives", strings.Join(cells, ", ")))
+	a.println(i18n.T("cli.overflow.two-ways"))
+	a.printf("%s\n", i18n.Tf("cli.overflow.option-a", (ov.Total/10000+1)*10000))
+	a.println(i18n.T("cli.overflow.option-b"))
 	a.println("")
 }
 
@@ -575,8 +610,9 @@ func (a *app) cmdShow(o *options) int {
 		}
 	}
 	pairs = slicePairs(pairs, o)
-	header := fmt.Sprintf("分区 %d｜%s｜%s｜%d 个 / %s｜index %d-%d｜盘 %s",
-		part.PID, part.TimeRange, part.Label, part.Count, tty.Human(float64(part.Size)),
+	header := i18n.Tf("cli.show.header",
+		part.PID, part.TimeRange, part.Label, part.Count,
+		i18n.Noun(part.Count, "个", "item", "items"), tty.Human(float64(part.Size)),
 		part.IndexStart, part.IndexEnd, part.Drives)
 	limit := len(pairs)
 	if o.limit != 0 {
@@ -592,11 +628,13 @@ func (a *app) cmdShow(o *options) int {
 	}
 	a.printItems(shown, header)
 	if len(shown) < len(pairs) {
-		unit := "个全局 index"
+		hidden := len(pairs) - len(shown)
+		// 中文这边只有量词短语、不分单复数；英文要 "1 global index" / "2 global indexes"
+		unit := i18n.Noun(hidden, "个全局 index", "global index", "global indexes")
 		if o.local {
-			unit = "个分区内序号"
+			unit = i18n.Noun(hidden, "个分区内序号", "in-partition position", "in-partition positions")
 		}
-		a.printf("（另有 %d %s 未显示；--limit 0 全部显示，--start/--end 指定区间）\n", len(pairs)-len(shown), unit)
+		a.printf("%s\n", i18n.Tf("cli.show.hidden", hidden, unit))
 	}
 	return 0
 }
@@ -663,9 +701,9 @@ func (a *app) cmdDelete(o *options) int {
 	if len(chosen) == 0 {
 		prefix := o.prefix
 		if prefix == "" {
-			prefix = "(空)"
+			prefix = i18n.T("cli.del.empty-prefix")
 		}
-		a.printf("没有匹配项：编号 %s 加上前缀过滤 %s 后为空，未做任何改动。\n", o.pids, prefix)
+		a.printf("%s\n", i18n.Tf("cli.del.nomatch", o.pids, prefix))
 		return 0
 	}
 	count := 0
@@ -677,42 +715,42 @@ func (a *app) cmdDelete(o *options) int {
 	for i, p := range chosen {
 		pids[i] = strconv.Itoa(p.PID)
 	}
-	a.printf("选中分区 %d 个: %s\n", len(chosen), strings.Join(pids, ","))
-	a.printf("%s\n", tty.Table([]string{"编号", "时间范围", "路径组/前缀组", "元素数", "大小", "index区间"},
-		func() [][]string {
-			rows := make([][]string, 0, len(chosen))
-			for _, p := range chosen {
-				rows = append(rows, []string{strconv.Itoa(p.PID), p.TimeRange, p.Label,
-					strconv.Itoa(p.Count), tty.Human(float64(p.Size)),
-					fmt.Sprintf("%d-%d", p.IndexStart, p.IndexEnd)})
-			}
-			return rows
-		}(), []int{4, 24, 44, 7, 9, 12}))
-	a.printf("本次将永久删除 %d 个条目，约 %s（不可恢复）\n", count, tty.Human(float64(totalSize)))
+	a.printf("%s\n", i18n.Tf("cli.del.selected", len(chosen),
+		i18n.Noun(len(chosen), "个", "partition", "partitions"), strings.Join(pids, ",")))
+	slim := make([][]string, 0, len(chosen))
+	for _, r := range partsRows(chosen) {
+		slim = append(slim, r[:6])
+	}
+	a.printf("%s\n", tty.Table([]string{i18n.T("cli.th.pid"), i18n.T("cli.th.range"),
+		i18n.T("cli.th.group2"), i18n.T("cli.th.count"), i18n.T("cli.th.size"), i18n.T("cli.th.index")},
+		slim, []int{4, 24, 44, 7, 9, 12}))
+	a.printf("%s\n", i18n.Tf("cli.del.will", count,
+		i18n.Noun(count, "个条目", "item", "items"), tty.Human(float64(totalSize))))
 
 	if o.dryRun {
 		sample := count
 		if o.sample < sample {
 			sample = o.sample
 		}
-		a.printItems(dryRunPairs(st, chosen, sample), fmt.Sprintf("dry-run 预览前 %d 条：", sample))
-		a.println("未做任何改动。确认无误后加 --yes 执行真删除。")
+		a.printItems(dryRunPairs(st, chosen, sample), i18n.Tf("cli.del.dryrun-preview", sample))
+		a.println(i18n.T("cli.del.dryrun-done"))
 		return 0
 	}
 	if !o.yes {
 		if !a.inShell {
-			a.println("这是不可逆操作。加 --yes 明确确认后再执行（或先用 --dry-run 看清单）。")
+			a.println(i18n.T("cli.del.need-yes"))
 			return 2
 		}
-		if !a.ask(fmt.Sprintf("确认永久删除这 %d 个条目 / %s（不可恢复）？", count, tty.Human(float64(totalSize)))) {
-			a.println("已取消，未做任何改动。")
+		if !a.ask(i18n.Tf("cli.del.ask", count,
+			i18n.Noun(count, "个条目", "item", "items"), tty.Human(float64(totalSize)))) {
+			a.println(i18n.T("cli.del.cancelled"))
 			return 0
 		}
 	}
 
 	report, err := engine.RunDelete(st, chosen, o.stateDir, o.max, o.every, o.verbose,
 		func(n, total, done, failed int) {
-			a.printf("  进度 %d/%d  已删 %d  失败 %d\n", n, total, done, failed)
+			a.printf("%s\n", i18n.Tf("cli.del.progress", n, total, done, failed))
 		})
 	if err != nil && report == nil {
 		// 保险丝或账本打不开：一条都没动
@@ -720,18 +758,18 @@ func (a *app) cmdDelete(o *options) int {
 		return 2
 	}
 	if err != nil {
-		return a.fail(1, "删除中断: %s", err.Error())
+		return a.fail(1, "%s", i18n.Tf("cli.del.interrupted", err))
 	}
-	a.printf("\n完成：删除 %d 个，失败 %d 个，账本 %s\n", report.Done, report.Failed,
-		filepath.Join(o.stateDir, store.LedgerName))
+	a.printf("\n%s\n", i18n.Tf("cli.del.done", report.Done, report.Failed,
+		filepath.Join(o.stateDir, store.LedgerName)))
 	for i, line := range report.Errors {
 		if i == 10 {
 			break
 		}
 		a.printf("  ! %s\n", line)
 	}
-	a.printf("快照已更新（%s）：标记了本次删掉的条目，编号不变。\n", store.Path(o.stateDir))
-	a.println("要看回收站最新状态请重新 scan：编号按当前内容重建，shell 里这等于创建新上下文。")
+	a.printf("%s\n", i18n.Tf("cli.del.state-updated", store.Path(o.stateDir)))
+	a.println(i18n.T("cli.del.rescan"))
 	if report.Failed > 0 {
 		return 1
 	}
@@ -766,29 +804,11 @@ func (a *app) ask(question string) bool {
 
 // ---------- 交互 shell ----------
 
-const shellHelp = `可用命令（就是那几个子命令，参数写法一样）:
-  scan [选项]                    重新扫描 + 分区，创建新快照；之后的 show/delete 都用这份新编号
-                                 选项同 scan: --bucket --by --dir-level --max-parts --min-count
-                                 --max-buckets --prefix-len --drives --max-scan
-  parts [--alive] [--sort time|size|count]      重列当前快照的分区统计表
-  show <编号> [--start N --end N] [--prefix 串] [--limit 0] [--tail] [--local]
-  delete <编号> [--dry-run|--yes] [--prefix 串] [--max N] [--sample N] [-v]
-                                 编号支持 1-5,8-10,16。不带 --yes 时会在这里问一次 y/N
-  info                           当前快照来自哪一次 scan、参数是什么
-  help | quit | exit | q
-例子:
-  parts --sort size
-  show 12 --limit 20
-  delete 12-15 --dry-run
-  delete 12-15
-  scan --by dir --dir-level 1 --bucket gap:10m
-`
-
 func (a *app) cmdShell(o *options) int {
 	a.inShell = true
 	a.sessStateDir = o.stateDir
-	a.println("回收站分批管理 shell：scan 一次，show/delete 反复用同一份快照，编号不会漂。")
-	a.printf("快照目录 %s    输入 help 看用法，quit 退出。\n", o.stateDir)
+	a.println(i18n.T("cli.shell.intro"))
+	a.printf("%s\n", i18n.Tf("cli.shell.state-dir", o.stateDir))
 	if !o.noScan {
 		a.cmdScan(o)
 	}
@@ -816,7 +836,7 @@ func (a *app) prompt() string {
 	if len(created) > 11 {
 		created = created[11:]
 	}
-	return fmt.Sprintf("rbm[%s 快照 %d条/%d区 剩%d]> ", created, len(a.state.Items),
+	return i18n.Tf("cli.prompt.state", created, len(a.state.Items),
 		len(a.state.Parts), a.state.AliveLeft())
 }
 
@@ -861,6 +881,14 @@ func (a *app) runLine(line string) int {
 	for i, t := range tokens {
 		tokens[i] = strings.Trim(t, "'\"")
 	}
+	// 会话里也认 --lang，和命令行「位置随意」同一个口径
+	lang, rest := SplitLangArgs(tokens)
+	tokens = rest
+	if lang != "" {
+		if l, ok := i18n.Parse(lang); ok {
+			i18n.Set(l)
+		}
+	}
 	if len(tokens) == 0 {
 		return 0
 	}
@@ -869,14 +897,14 @@ func (a *app) runLine(line string) int {
 	case "quit", "exit", "q", "退出":
 		return quitSession
 	case "help", "?", "h", "帮助":
-		a.printf("%s", shellHelp)
+		a.printf("%s", i18n.T("cli.help.shell"))
 		return 0
 	case "info":
 		a.printInfo()
 		return 0
 	}
 	if _, ok := flagSpecs[head]; !ok {
-		a.printf("  rbm %s: error: 无法识别的命令 %s（help 看用法）\n", head, head)
+		a.printf("%s\n", i18n.Tf("cli.bad-shell-command", head, head))
 		return 2
 	}
 	opts, pos, help, err := parseFlags(head, tokens[1:])
@@ -904,7 +932,7 @@ func (a *app) runLine(line string) int {
 		opts.stateDir = a.sessStateDir
 	}
 	if head == "shell" {
-		a.println("  已经在 shell 里了，直接输入 scan / show / delete 即可。")
+		a.println(i18n.T("cli.shell.already-in"))
 		return 0
 	}
 	return a.dispatch(head, opts)
@@ -913,20 +941,21 @@ func (a *app) runLine(line string) int {
 func (a *app) printInfo() {
 	stateDir := a.sessStateDir
 	if a.state == nil {
-		a.printf("  当前内存里没有快照（磁盘上可能有，命令会退回读 %s）\n", store.Path(stateDir))
+		a.printf("%s\n", i18n.Tf("cli.info.no-snapshot", store.Path(stateDir)))
 		return
 	}
 	st := a.state
-	a.printf("  快照时间 %s  条目 %d  分区 %d\n", st.Created, len(st.Items), len(st.Parts))
-	a.printf("  参数 %s\n", paramsJSON(st.Params))
+	a.printf("%s\n", i18n.Tf("cli.info.line", st.Created, len(st.Items), len(st.Parts)))
+	a.printf("%s\n", i18n.Tf("cli.info.params", paramsJSON(st.Params)))
 	deleted := 0
 	for _, p := range st.Parts {
 		deleted += p.Deleted
 	}
 	if deleted > 0 {
-		a.printf("  本快照内已标记删除 %d 个（编号不变；要看真实状态请 scan 重建）\n", deleted)
+		a.printf("%s\n", i18n.Tf("cli.info.deleted", deleted,
+			i18n.Noun(deleted, "个", "item", "items")))
 	}
 	if st.LastDelete != "" {
-		a.printf("  上次删除 %s\n", st.LastDelete)
+		a.printf("%s\n", i18n.Tf("cli.info.last-delete", st.LastDelete))
 	}
 }

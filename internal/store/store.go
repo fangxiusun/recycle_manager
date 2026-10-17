@@ -6,13 +6,14 @@ package store
 import (
 	"encoding/csv"
 	"encoding/json"
-	"fmt"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
+	"rbm/internal/i18n"
 	"rbm/internal/meta"
 	"rbm/internal/parts"
 )
@@ -56,13 +57,13 @@ func Read(stateDir string) (*State, error) {
 	raw, err := os.ReadFile(Path(stateDir))
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("没有找到快照 %s，请先运行 scan", Path(stateDir))
+			return nil, errors.New(i18n.Tf("store.no-snapshot", Path(stateDir)))
 		}
 		return nil, err
 	}
 	var st State
 	if err := json.Unmarshal(raw, &st); err != nil {
-		return nil, fmt.Errorf("快照 %s 解析失败: %w", Path(stateDir), err)
+		return nil, errors.New(i18n.Tf("store.bad-snapshot", Path(stateDir), err))
 	}
 	return &st, nil
 }
@@ -83,12 +84,13 @@ func Write(stateDir string, st *State) error {
 	return os.Rename(tmp, Path(stateDir))
 }
 
-// GroupCol 是统计表里那一列的标题，随分组维度变。
+// GroupCol 是统计表里那一列的标题，随分组维度变。只用于界面表头；
+// scan_list.csv 的表头是落盘口径，走另一条固定写法，不受语言影响。
 func (st *State) GroupCol() string {
 	if st.Params.By == "dir" {
-		return "路径组"
+		return i18n.T("store.group-col.dir")
 	}
-	return "前缀组"
+	return i18n.T("store.group-col.prefix")
 }
 
 // AliveLeft 统计还没删完的条目数，供 shell 提示符与 GUI 状态栏用。

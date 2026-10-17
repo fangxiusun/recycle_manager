@@ -1,6 +1,6 @@
 @echo off
-rem rbm build script: produces two exes from the same source (see README section 2 and
-rem docs/gui section 10 for the measured details).
+rem rbm build script: produces two exes from the same source. Measured details are in docs/:
+rem build & verification note section 2 (rsrc.syso, PE heads), GUI doc section 10 (no console flash).
 rem   rbm.exe      console subsystem (PE subsystem=3): terminal keeps waiting for subcommands.
 rem   rbm-gui.exe  GUI subsystem (PE subsystem=2): no console is ever created, so double-click
 rem                never flashes a black window.

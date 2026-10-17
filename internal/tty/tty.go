@@ -3,6 +3,7 @@
 package tty
 
 import (
+	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -10,6 +11,8 @@ import (
 	"unicode"
 
 	"github.com/mattn/go-runewidth"
+
+	"rbm/internal/i18n"
 )
 
 // Human 把字节数写成 84B / 158.5MB 这样的一列宽文本。
@@ -112,23 +115,23 @@ func ParseIDs(spec string, upper int) ([]int, error) {
 	}) {
 		m := idRange.FindStringSubmatch(token)
 		if m == nil {
-			return nil, fmt.Errorf("编号写法无法识别: %s（示例: 1-5,8-10,16）", token)
+			return nil, errors.New(i18n.Tf("tty.ids.bad", token))
 		}
 		start, err := strconv.Atoi(m[1])
 		if err != nil {
-			return nil, fmt.Errorf("编号写法无法识别: %s（示例: 1-5,8-10,16）", token)
+			return nil, errors.New(i18n.Tf("tty.ids.bad", token))
 		}
 		end := start
 		if m[2] != "" {
 			if end, err = strconv.Atoi(m[2]); err != nil {
-				return nil, fmt.Errorf("编号写法无法识别: %s（示例: 1-5,8-10,16）", token)
+				return nil, errors.New(i18n.Tf("tty.ids.bad", token))
 			}
 		}
 		if end < start {
 			start, end = end, start
 		}
 		if start < 1 || end > upper {
-			return nil, fmt.Errorf("编号 %s 超出范围 1-%d", token, upper)
+			return nil, errors.New(i18n.Tf("tty.ids.range", token, upper))
 		}
 		for i := start; i <= end; i++ {
 			ids = append(ids, i)

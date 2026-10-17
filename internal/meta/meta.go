@@ -5,6 +5,7 @@ package meta
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 
 	"golang.org/x/sys/windows"
 
+	"rbm/internal/i18n"
 	"rbm/internal/winfs"
 )
 
@@ -58,11 +60,11 @@ func CurrentSID() (string, error) {
 	token := windows.GetCurrentProcessToken()
 	tu, err := token.GetTokenUser()
 	if err != nil {
-		return "", fmt.Errorf("GetTokenInformation 失败: %w", err)
+		return "", errors.New(i18n.Tf("meta.sid.token", err))
 	}
 	sid := tu.User.Sid.String()
 	if sid == "" {
-		return "", fmt.Errorf("ConvertSidToStringSidW 失败")
+		return "", errors.New(i18n.T("meta.sid.string"))
 	}
 	return sid, nil
 }
@@ -115,6 +117,9 @@ type iHead struct {
 }
 
 // parseIFile 解析单个 $I；长度自校验不通过或路径为空都返回 error，由 Scan 归为损坏条目。
+//
+// 这里的报错文字刻意不进 i18n 目录：它们只被 Scan 包进 issues 记录（落 state.json、与 Python
+// 黄金样例逐条比对），从不单独面客。翻了语言就会改动落盘内容，那是数据口径而不是界面口径。
 func parseIFile(iPath string) (*iHead, error) {
 	raw, err := os.ReadFile(iPath)
 	if err != nil {

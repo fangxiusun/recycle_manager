@@ -3,11 +3,13 @@
 package engine
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
 	"time"
 
+	"rbm/internal/i18n"
 	"rbm/internal/meta"
 	"rbm/internal/parts"
 	"rbm/internal/store"
@@ -43,7 +45,7 @@ func Scan(o Options) (*Snapshot, error) {
 		return nil, err
 	}
 	if len(o.Drives) > 0 && len(dirs) == 0 {
-		return nil, fmt.Errorf("指定盘 %s 下没有当前用户的回收站目录", o.DrivesSpec)
+		return nil, errors.New(i18n.Tf("engine.no-bin", o.DrivesSpec))
 	}
 	items, issues, overflow := meta.Scan(dirs, o.MaxScan)
 	st, err := BuildState(items, issues, o)
@@ -160,6 +162,9 @@ func SelectedParts(st *store.State, ids []int, prefix string) []*parts.Part {
 }
 
 // DeleteOne 永久删除一个回收站条目（$R 数据 + $I 元数据），返回 (是否干净删完, 说明)。
+//
+// 返回的说明会原样写进 ledger.csv 的「结果」列（「已删」或错误摘要），属于落盘口径，
+// 所以这里的中文串不进 i18n 目录；界面要表达「删除失败」有自己的日志文案。
 func DeleteOne(item *meta.Item) (bool, string) {
 	var errors []string
 	if winfs.Exists(item.RPath) {
@@ -210,7 +215,7 @@ func RunDelete(st *store.State, chosen []*parts.Part, stateDir string, max, ever
 		}
 	}
 	if max > 0 && len(collected) > max {
-		return nil, fmt.Errorf("条目数 %d 超过 --max %d，已中止。可分区分批删。", len(collected), max)
+		return nil, errors.New(i18n.Tf("engine.fuse", len(collected), max))
 	}
 	if every < 1 {
 		every = 1
