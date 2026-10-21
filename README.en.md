@@ -69,7 +69,7 @@ operations instead of one unbreakable multi-hour block.
 |:---:|---|---|
 | 🗑️ | **Recycle Bin metadata** | Parses `$I` for the original path, deletion time, size and drive. Orphan `$R` files (no matching `$I`), special locations and damaged metadata are named in an anomaly list and left alone. |
 | 📊 | **Two-level batching** | First bucket by deletion time (16 presets, the last one is free-form), then group inside each bucket by folder / character prefix / extension / first filename token, and number the result. |
-| 🔍 | **Observable** | Per-batch item count and size, click a row to see its contents, per-item progress, and 未删完 / "unfinished" plus 剩余 / "left" columns when it's done. |
+| 🔍 | **Observable** | Per-batch item count and size, click a row to see its contents, per-item progress, and 未删完 / "unfinished" plus 剩余 / "left" columns when it's done. The scan also logs **per-stage timing** (nine stages + per-item counters + one line per drive + which drives auto-enumeration skipped), so the slow stage is visible at a glance. |
 | 🛡️ | **Three gates** | Preview / `--dry-run` → confirmation dialog → `--max` fuse. Nothing moves by default. |
 | 📄 | **Paper trail** | `scan_list.csv` (full manifest, UTF-8 BOM + CRLF so Excel opens it by double-click) and `ledger.csv` (one appended line per deletion). |
 | 🖱️ | **GUI** | Double-click `rbm-gui.exe` and no console window appears at any point; scans on open; tick boxes, <kbd>Shift</kbd>-click spans, type `1-5,8-10,16`, or 全选 / "select all". |
@@ -265,6 +265,9 @@ The three detailed guides under `docs/` are written in Chinese and quote the Chi
 ## 📌 Known limitations (summary)
 
 - Windows only; the current user's SID only; drive letters come from the `GetLogicalDrives` mask.
+  **Auto-enumeration skips network drives, optical drives and letters with no root directory** — one
+  stale mapped drive can hold a scan for twenty-something seconds. To look at a mapped drive's recycle
+  bin, name it explicitly: `--drives y`.
 - Partition ids are valid **within the current snapshot only** — a rescan renumbers.
 - Time buckets render in the machine's local offset captured at startup, so items deleted across a DST
   boundary are interpreted with today's offset.
@@ -284,8 +287,11 @@ The full list lives in [docs/known-issues.md](docs/known-issues.md) (Chinese).
   repaint-on-delete fix
 - [x] **M6**: two READMEs, docs index / roadmap / known-issues / changelog, MIT licence and the full
   text of every dependency's licence
-- [ ] **M7**: double-click verification of the downloaded package, A/B evidence on the real delete
-  path, a repaint regression case, GUI smoke in CI, English versions of the detailed guides
+- [x] **M7**: per-stage scan timing in the log (so the bottleneck is visible), three speed-ups
+  (a stale mapped drive no longer stalls the whole scan)
+- [ ] **M8**: double-click verification of the downloaded package, A/B evidence on the real delete
+  path, a repaint regression case, GUI smoke in CI, English versions of the detailed guides,
+  an incremental `$I` cache
 
 Details in [docs/roadmap.md](docs/roadmap.md) (Chinese).
 
