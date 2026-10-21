@@ -84,4 +84,31 @@ var catalog = map[string]entry{
 		"条目数 %d 超过 --max %d，已中止。可分区分批删。",
 		"%d items exceed --max %d, so nothing was touched. Delete one or two partitions at a time.",
 	},
+
+	// ── 扫描分段计时（CLI 与 GUI 的日志共用同一套段名）──
+	"scan.timing.line":   {"分段计时：%s", "Stage timing: %s"},
+	"scan.timing.sep":    {"｜", " | "},
+	"scan.timing.counts": {`逐条计数：$I 读取 %d 次，$R 检查 %d 次，列目录拿到 %d 个目录项`, `Per-item counts: %d $I reads, %d $R checks, %d dir entries listed`},
+	"scan.timing.drive": {
+		`%s 盘：探测 %s｜列目录 %s｜$I 读取 %s（%d %s）｜$R 检查 %s`,
+		`Drive %s: probe %s | listing %s | $I read %s (%d %s) | $R check %s`,
+	},
+	"scan.timing.skip": {
+		`自动枚举跳过的盘（没有探测）：%s`,
+		`Drives skipped by auto-enumeration (not probed): %s`,
+	},
+	"scan.volume.remote":  {"网络盘", "network drive"},
+	"scan.volume.cdrom":   {"光驱", "optical drive"},
+	"scan.volume.no-root": {"无根目录（读卡器空着或设备已断开）", "no root (empty reader, unplugged device)"},
+	"scan.volume.other":   {"非本地卷", "non-local volume"},
+	"scan.stage.resolve":  {"目录解析", "bin dirs"},
+	"scan.stage.list":     {"列目录", "listing"},
+	"scan.stage.read-i":   {"$I 读取", "$I read"},
+	"scan.stage.parse-i":  {"$I 解析", "$I decode"},
+	"scan.stage.stat-r":   {"$R 检查", "$R check"},
+	"scan.stage.cap":      {"截断排序", "cap sort"},
+	"scan.stage.build":    {"分区构建", "partitioning"},
+	"scan.stage.write":    {"快照写入", "snapshot write"},
+	"scan.stage.csv":      {"清单写入", "manifest write"},
+	"scan.stage.total":    {"分段合计", "stages total"},
 }

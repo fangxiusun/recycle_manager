@@ -1295,8 +1295,13 @@ func (a *app) startScan() {
 		snap, err := engine.Scan(o)
 		var listPath string
 		if err == nil {
-			if err = store.Write(dir, snap.State); err == nil {
+			tWrite := time.Now()
+			err = store.Write(dir, snap.State)
+			snap.Stats.Write = time.Since(tWrite)
+			if err == nil {
+				tCSV := time.Now()
 				listPath, err = store.WriteListCSV(dir, snap.State)
+				snap.Stats.CSV = time.Since(tCSV)
 			}
 		}
 		elapsed := time.Since(start)
@@ -1320,6 +1325,7 @@ func (a *app) startScan() {
 				a.ok(i18n.Tf("gui.scan.done", spent, len(st.Items),
 					tty.Human(float64(totalSize(st))), len(st.Parts), len(st.Parts)))
 			}
+			a.log(snap.Stats.TimingText())
 			if snap.Overflow != nil {
 				a.warn(overflowText(snap.Overflow))
 			}

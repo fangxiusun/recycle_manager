@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"rbm/internal/engine"
 	"rbm/internal/i18n"
@@ -521,6 +522,7 @@ func engineOptions(o *options) engine.Options {
 }
 
 func (a *app) cmdScan(o *options) int {
+	start := time.Now()
 	snap, err := engine.Scan(engineOptions(o))
 	if err != nil {
 		return a.fail(1, "%s", err.Error())
@@ -529,10 +531,16 @@ func (a *app) cmdScan(o *options) int {
 		a.printOverflow(snap.Overflow)
 	}
 	st := snap.State
-	if err := store.Write(o.stateDir, st); err != nil {
+	tWrite := time.Now()
+	err = store.Write(o.stateDir, st)
+	snap.Stats.Write = time.Since(tWrite)
+	if err != nil {
 		return a.fail(1, "%s", err.Error())
 	}
+	tCSV := time.Now()
 	listPath, err := store.WriteListCSV(o.stateDir, st)
+	snap.Stats.CSV = time.Since(tCSV)
+	wall := time.Since(start)
 	if err != nil {
 		return a.fail(1, "%s", err.Error())
 	}
@@ -550,6 +558,8 @@ func (a *app) cmdScan(o *options) int {
 		}
 	}
 	a.printf("\n%s\n", i18n.Tf("cli.scan.list-written", listPath))
+	a.printf("%s\n", i18n.Tf("cli.scan.elapsed", wall.Round(10*time.Millisecond)))
+	a.printf("%s\n", snap.Stats.TimingText())
 	if snap.Overflow != nil {
 		a.println(i18n.T("cli.scan.overflow-note"))
 	}

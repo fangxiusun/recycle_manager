@@ -31,28 +31,34 @@ type Options struct {
 	StateDir   string
 }
 
-// Snapshot 是一份可用的快照 + 截断说明。
+// Snapshot 是一份可用的快照 + 截断说明 + 分段计时。
 type Snapshot struct {
 	State    *store.State
 	Overflow *meta.Overflow
+	Stats    *meta.Stats
 }
 
 // Scan 扫描回收站并分区。条目为 0 不是错误：回收站本来就是空的，照样落一份空快照，
 // 由调用方按「扫描完成，0 个」报出去。只有指定的盘根本没有当前用户的回收站目录才算用法错。
+//
+// Stats 是填好的分段计时（落盘两段由调用方补：CLI/GUI 各自写 state.json 与 scan_list.csv）。
 func Scan(o Options) (*Snapshot, error) {
-	dirs, err := meta.BinDirs(o.Drives)
+	stats := &meta.Stats{}
+	dirs, err := meta.BinDirsTimed(o.Drives, stats)
 	if err != nil {
 		return nil, err
 	}
 	if len(o.Drives) > 0 && len(dirs) == 0 {
 		return nil, errors.New(i18n.Tf("engine.no-bin", o.DrivesSpec))
 	}
-	items, issues, overflow := meta.Scan(dirs, o.MaxScan)
+	items, issues, overflow := meta.ScanTimed(dirs, o.MaxScan, stats)
+	tBuild := time.Now()
 	st, err := BuildState(items, issues, o)
+	stats.Build = time.Since(tBuild)
 	if err != nil {
 		return nil, err
 	}
-	return &Snapshot{State: st, Overflow: overflow}, nil
+	return &Snapshot{State: st, Overflow: overflow, Stats: stats}, nil
 }
 
 // BuildState 把条目分区成快照。items 为空是合法输入：得到一份 Items/Parts 都是空表、

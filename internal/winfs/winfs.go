@@ -33,6 +33,13 @@ func ModTimeMicro(path string) (int64, bool) {
 // PathPtr 把路径转成 Win32 用的 UTF-16 指针。
 func PathPtr(path string) *uint16 { return syscall.StringToUTF16Ptr(path) }
 
+// DriveType 返回盘符的卷类型（windows.DRIVE_FIXED / DRIVE_REMOTE / DRIVE_CDROM…）。
+// 它读的是系统卷表里的缓存，不会把请求发到网络服务器上，所以可以拿它在不碰盘的前提下
+// 判断「这个盘值不值得探测」；不存在的盘返回 DRIVE_NO_ROOT_DIR。
+func DriveType(drive string) uint32 {
+	return windows.GetDriveType(PathPtr(drive + `:\`))
+}
+
 // Attrs 返回路径的 Win32 属性；路径不存在（或无权访问）时 ok 为 false。
 // 对符号链接/目录 junction 取的是链接自身，等价于 lexists 而不是 exists。
 func Attrs(path string) (attr uint32, ok bool) {

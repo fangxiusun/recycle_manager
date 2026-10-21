@@ -10,6 +10,9 @@ import (
 	"time"
 	"unicode/utf16"
 
+	"golang.org/x/sys/windows"
+
+	"rbm/internal/i18n"
 	"rbm/internal/winfs"
 )
 
@@ -326,5 +329,157 @@ func TestBaseNameAndDecode(t *testing.T) {
 	}
 	if got := decodeUTF16([]byte{0x41, 0x00, 0x42}); got != "A" {
 		t.Errorf("奇数长度应当丢掉最后半个字: %q", got)
+	}
+}
+
+// ---- 分段计时 ----
+
+func TestScanTimedFillsStats(t *testing.T) {
+	dir := t.TempDir()
+	base := time.Date(2026, 10, 15, 9, 0, 0, 0, time.UTC)
+	makePair(t, dir, "001a.txt", `Z:\work\out\a.txt`, 100, base, 2)
+	makePair(t, dir, "002b.txt", `Z:\work\out\b.txt`, 200, base, 2)
+	writeFile(t, filepath.Join(dir, "$I003c.txt"), iBytes(`Z:\work\out\c.txt`, 300, base, 2))
+
+	st := &Stats{}
+	items, _, _ := ScanTimed([]BinDir{{Drive: "Z", Path: dir}}, 0, st)
+	if len(items) != 3 {
+		t.Fatalf("条目数 %d，期望 3", len(items))
+	}
+	// 三个 $I 都读了一次、都判了一次存在性；目录项是 5 个（3×$I + 2×$R）。
+	if st.Reads != 3 || st.Checks != 3 || st.Entries != 5 {
+		t.Errorf("计数不符: 读取 %d 检查 %d 目录项 %d", st.Reads, st.Checks, st.Entries)
+	}
+	if len(st.Drives) != 1 || st.Drives[0].Drive != "Z" || st.Drives[0].Reads != 3 {
+		t.Errorf("分盘计时行不符: %+v", st.Drives)
+	}
+	if st.Build != 0 || st.Write != 0 {
+		t.Errorf("ScanTimed 不该填分区构建与落盘两段: %+v", st)
+	}
+	if got := st.Total(); got < 0 {
+		t.Errorf("合计不该是负数: %v", got)
+	}
+	// 传 nil 表示不计，也不能panic。
+	if items2, _, _ := ScanTimed([]BinDir{{Drive: "Z", Path: dir}}, 0, nil); len(items2) != 3 {
+		t.Errorf("stats 传 nil 时条目数不符: %d", len(items2))
+	}
+}
+
+func TestStatsTimingText(t *testing.T) {
+	before := i18n.Get()
+	t.Cleanup(func() { i18n.Set(before) })
+
+	st := &Stats{
+		Resolve: 3 * time.Millisecond,
+		List:    106 * time.Millisecond,
+		ReadI:   1451 * time.Millisecond,
+		ParseI:  7 * time.Millisecond,
+		StatR:   5 * time.Millisecond,
+		Build:   4 * time.Millisecond,
+		Write:   14 * time.Millisecond,
+		CSV:     6 * time.Millisecond,
+		Reads:   6941,
+		Checks:  6941,
+		Entries: 13886,
+		Drives:  []DriveStat{{Drive: "C"}, {Drive: "G"}},
+		Skipped: []SkippedDrive{{Drive: "Y", Type: windows.DRIVE_REMOTE}},
+	}
+	if got := st.Total(); got != 1596*time.Millisecond {
+		t.Errorf("分段合计 %v，期望 1.596s", got)
+	}
+
+	i18n.Set(i18n.Zh)
+	zh := st.TimingText()
+	for _, want := range []string{`分段计时`, `$I 读取 1.451s`, `$R 检查 5ms`, `分段合计 1.596s`,
+		`$I 读取 6941 次`, `G 盘`, `Y: 网络盘`} {
+		if !strings.Contains(zh, want) {
+			t.Errorf("中文计时日志缺 %q:\n%s", want, zh)
+		}
+	}
+	i18n.Set(i18n.En)
+	en := st.TimingText()
+	for _, want := range []string{`Stage timing`, `$I read 1.451s`, `stages total 1.596s`,
+		`6941 $I reads`, `Drive G`, `Y: network drive`} {
+		if !strings.Contains(en, want) {
+			t.Errorf("英文计时日志缺 %q:\n%s", want, en)
+		}
+	}
+	for _, s := range []string{zh, en} {
+		if strings.Contains(s, "MISSING") || strings.Contains(s, "BAD ") {
+			t.Errorf("计时日志有参数没被吃完: %q", s)
+		}
+	}
+
+	// 只有一个盘时不必铺分盘行，跳过的盘也没有就不写那一行。
+	one := (&Stats{Drives: []DriveStat{{Drive: "C"}}}).TimingText()
+	if strings.Contains(one, "C 盘") || strings.Contains(one, "跳过的盘") {
+		t.Errorf("单盘日志多铺了行:\n%s", one)
+	}
+}
+
+// 自动枚举只探本地卷：失联的映射盘会在一次 GetFileAttributes 上卡到重连超时。
+func TestSkipVolumeClasses(t *testing.T) {
+	for _, c := range []struct {
+		typ  uint32
+		skip bool
+	}{
+		{windows.DRIVE_NO_ROOT_DIR, true},
+		{windows.DRIVE_REMOVABLE, false},
+		{windows.DRIVE_FIXED, false},
+		{windows.DRIVE_REMOTE, true},
+		{windows.DRIVE_CDROM, true},
+		{windows.DRIVE_RAMDISK, false},
+	} {
+		if got := skipVolume(c.typ); got != c.skip {
+			t.Errorf("卷类型 %d 跳过判定 = %v，期望 %v", c.typ, got, c.skip)
+		}
+	}
+}
+
+// $R 是否还在改由列目录的名字集合判断，大小写不敏感（原来逐条 GetFileAttributes 也是不敏感的），
+// 并且不再发系统调用。孤儿判定仍按原名逐字符比，这条口径没动。
+func TestScanPairsIgnoresCase(t *testing.T) {
+	dir := t.TempDir()
+	base := time.Date(2026, 10, 15, 9, 0, 0, 0, time.UTC)
+	writeFile(t, filepath.Join(dir, "$I00AA.TXT"), iBytes(`Z:\work\out\A.TXT`, 100, base, 2))
+	// $R 用另一种大小写写法，存在性仍然要成立。
+	writeFile(t, filepath.Join(dir, "$R00aa.txt"), []byte("y"))
+
+	items, issues, _ := Scan([]BinDir{{Drive: "Z", Path: dir}}, 0)
+	if len(items) != 1 {
+		t.Fatalf("条目数 %d，期望 1", len(items))
+	}
+	if !items[0].Exists {
+		t.Error("大小写不同的 $R 应当算存在")
+	}
+	if len(issues) != 1 || !strings.Contains(issues[0], "缺少 $I 元数据") {
+		t.Errorf("孤儿判定仍按原名逐字符比，大小写不同要报孤儿: %v", issues)
+	}
+}
+
+// 只解析、不碰文件：与 parseIFile 同义，Scan 用它把读和算分开计时。
+func TestParseIBytesMatchesParseIFile(t *testing.T) {
+	dir := t.TempDir()
+	base := time.Date(2026, 10, 15, 12, 34, 56, 0, time.UTC)
+	p := filepath.Join(dir, "$I0001x.txt")
+	writeFile(t, p, iBytes(`C:\Users\x\Desktop\x.txt`, 4096, base, 2))
+	raw, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	viaBytes, err := parseIBytes(raw)
+	if err != nil {
+		t.Fatalf("parseIBytes 失败: %v", err)
+	}
+	viaFile, err := parseIFile(p)
+	if err != nil {
+		t.Fatalf("parseIFile 失败: %v", err)
+	}
+	if viaBytes.origPath != viaFile.origPath || viaBytes.size != viaFile.size ||
+		viaBytes.metaVersion != viaFile.metaVersion || viaBytes.filetime != viaFile.filetime {
+		t.Errorf("两条路径结果不符: %+v vs %+v", viaBytes, viaFile)
+	}
+	if _, err := parseIBytes([]byte("短")); err == nil {
+		t.Error("短字节流应当报错")
 	}
 }

@@ -265,6 +265,10 @@ Examples:
 		`完整清单已写出: %s`,
 		`Full manifest written: %s`,
 	},
+	"cli.scan.elapsed": {
+		`本次扫描用时 %s`,
+		`This scan took %s`,
+	},
 	"cli.scan.overflow-note": {
 		`注意: 本次快照只覆盖最老的一部分条目，删完这批再 scan 会拿到剩下的内容。`,
 		`Note: this snapshot covers only the oldest slice of the bin. Delete this batch, then scan again to pick up the rest.`,

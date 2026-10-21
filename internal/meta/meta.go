@@ -48,6 +48,124 @@ type Overflow struct {
 	ByDrive map[string][2]int // 盘 -> {本次已扫, 该盘总数}
 }
 
+// Stats 是一次扫描的分段计时与逐条计数：「慢在哪一段」由它回答，日志只读它。
+// 每段只计自己那一段的墙钟，段外的开销不在里面，所以 Total 会小于调用方的总用时。
+// Resolve/Build/Write/CSV 由调用链上的不同层填（engine 填分区构建，CLI/GUI 填落盘）。
+type Stats struct {
+	Resolve time.Duration // 取 SID 并确认各盘的回收站目录
+	List    time.Duration // 各盘一次列目录（$I 名单、$R 名单都从这里来）
+	ReadI   time.Duration // 逐个打开并读出 $I 的字节
+	ParseI  time.Duration // 解码 $I 并换算展示字段（纯 CPU）
+	StatR   time.Duration // 逐条判断对应的 $R 数据还在不在
+	Cap     time.Duration // --max-scan 截断：取每个 $I 的写入时间再排序
+	Build   time.Duration // 分区构建
+	Write   time.Duration // state.json 落盘
+	CSV     time.Duration // scan_list.csv 落盘
+
+	Entries int // 列目录拿到的目录项总数
+	Reads   int // 读过的 $I 个数
+	Checks  int // $R 存在性判断次数
+	Drives  []DriveStat
+	Skipped []SkippedDrive // 自动枚举时被跳过的盘（不探测，日志里要说明）
+}
+
+// SkippedDrive 是一个没被探测的盘：类型给日志用来解释为什么跳过。
+type SkippedDrive struct {
+	Drive string
+	Type  uint32 // windows.DRIVE_REMOTE / DRIVE_CDROM / DRIVE_NO_ROOT_DIR
+}
+
+// DriveStat 是单个盘的拆分：一个慢盘（机械盘、网络盘、空读卡器）能把总数拖平，
+// 只有分盘才看得出来是整体慢还是某一盘慢。
+type DriveStat struct {
+	Drive   string
+	Entries int
+	Reads   int
+	Resolve time.Duration
+	List    time.Duration
+	Read    time.Duration
+	Stat    time.Duration
+}
+
+// Total 是已计分段之和。
+func (s *Stats) Total() time.Duration {
+	return s.Resolve + s.List + s.ReadI + s.ParseI + s.StatR + s.Cap +
+		s.Build + s.Write + s.CSV
+}
+
+// drive 取（必要时新建）某个盘的计时行，盘符顺序按首次出现排。
+func (s *Stats) drive(d string) *DriveStat {
+	for i := range s.Drives {
+		if s.Drives[i].Drive == d {
+			return &s.Drives[i]
+		}
+	}
+	s.Drives = append(s.Drives, DriveStat{Drive: d})
+	return &s.Drives[len(s.Drives)-1]
+}
+
+// fmtDur 给计时日志用：亚毫秒段保留到 10µs，其余到毫秒，免得满屏 0s。
+func fmtDur(d time.Duration) string {
+	if d < time.Millisecond {
+		return d.Round(10 * time.Microsecond).String()
+	}
+	return d.Round(time.Millisecond).String()
+}
+
+// TimingText 把分段计时排成日志文本：一行总计时、一行逐条计数，多于一个盘时逐盘再补一行。
+func (s *Stats) TimingText() string {
+	stages := []struct {
+		key string
+		dur time.Duration
+	}{
+		{"scan.stage.resolve", s.Resolve},
+		{"scan.stage.list", s.List},
+		{"scan.stage.read-i", s.ReadI},
+		{"scan.stage.parse-i", s.ParseI},
+		{"scan.stage.stat-r", s.StatR},
+		{"scan.stage.cap", s.Cap},
+		{"scan.stage.build", s.Build},
+		{"scan.stage.write", s.Write},
+		{"scan.stage.csv", s.CSV},
+	}
+	sep := i18n.T("scan.timing.sep")
+	cells := make([]string, 0, len(stages)+1)
+	for _, st := range stages {
+		cells = append(cells, i18n.T(st.key)+" "+fmtDur(st.dur))
+	}
+	cells = append(cells, i18n.T("scan.stage.total")+" "+fmtDur(s.Total()))
+	out := i18n.Tf("scan.timing.line", strings.Join(cells, sep)) + "\n" +
+		i18n.Tf("scan.timing.counts", s.Reads, s.Checks, s.Entries)
+	if len(s.Drives) > 1 {
+		for _, d := range s.Drives {
+			out += "\n" + i18n.Tf("scan.timing.drive", d.Drive, fmtDur(d.Resolve), fmtDur(d.List),
+				fmtDur(d.Read), d.Reads, i18n.Noun(d.Reads, "个", "file", "files"), fmtDur(d.Stat))
+		}
+	}
+	if len(s.Skipped) > 0 {
+		cells := make([]string, 0, len(s.Skipped))
+		for _, sk := range s.Skipped {
+			cells = append(cells, sk.Drive+": "+i18n.T(volumeKey(sk.Type)))
+		}
+		out += "\n" + i18n.Tf("scan.timing.skip", strings.Join(cells, sep))
+	}
+	return out
+}
+
+// volumeKey 把 GetDriveType 的数字换成日志里的卷类型词。
+func volumeKey(typ uint32) string {
+	switch typ {
+	case windows.DRIVE_REMOTE:
+		return "scan.volume.remote"
+	case windows.DRIVE_CDROM:
+		return "scan.volume.cdrom"
+	case windows.DRIVE_NO_ROOT_DIR:
+		return "scan.volume.no-root"
+	default:
+		return "scan.volume.other"
+	}
+}
+
 // LocalTZ 取当前系统时区的固定偏移，桶边界与时间字符串都按它算（同 Python 版 LOCAL_TZ）。
 var LocalTZ = func() *time.Location {
 	now := time.Now()
@@ -85,23 +203,57 @@ func LocalDrives() []string {
 }
 
 // BinDirs 返回各盘当前用户的回收站目录；目录不存在的盘自动跳过。
-func BinDirs(drives []string) ([]BinDir, error) {
+func BinDirs(drives []string) ([]BinDir, error) { return BinDirsTimed(drives, nil) }
+
+// BinDirsTimed 与 BinDirs 同义，额外把每个盘的探测耗时（以及跳过的盘）记进 stats。
+//
+// drives 留空（自动枚举全部盘）时只探本地卷：网络盘、光驱、没有根目录的盘符一律跳过。
+// 一条 SMB 映射指向失联的服务器时，GetFileAttributes 要等到重连超时才返回（本机实测单盘
+// 21s），而 Windows 从网络位置删除的对象本来就不落到任何盘的 $Recycle.Bin，探了也不会有条目。
+// 用户点名要扫的盘（--drives y）照旧探测，哪怕它是网络盘。
+func BinDirsTimed(drives []string, stats *Stats) ([]BinDir, error) {
+	if stats == nil {
+		stats = &Stats{}
+	}
+	tSid := time.Now()
 	sid, err := CurrentSID()
+	stats.Resolve += time.Since(tSid)
 	if err != nil {
 		return nil, err
 	}
-	if len(drives) == 0 {
+	explicit := len(drives) > 0
+	if !explicit {
 		drives = LocalDrives()
 	}
 	var out []BinDir
 	for _, d := range drives {
 		drive := strings.TrimRight(d, "\\:")
+		typ := winfs.DriveType(drive)
+		if !explicit && skipVolume(typ) {
+			stats.Skipped = append(stats.Skipped, SkippedDrive{Drive: drive, Type: typ})
+			continue
+		}
 		path := filepath.Join(drive+":\\", "$Recycle.Bin", sid)
-		if a, ok := winfs.Attrs(path); ok && a&windows.FILE_ATTRIBUTE_DIRECTORY != 0 {
+		t := time.Now()
+		a, ok := winfs.Attrs(path)
+		spent := time.Since(t)
+		stats.Resolve += spent
+		stats.drive(drive).Resolve += spent
+		if ok && a&windows.FILE_ATTRIBUTE_DIRECTORY != 0 {
 			out = append(out, BinDir{Drive: drive, Path: path})
 		}
 	}
 	return out, nil
+}
+
+// skipVolume 报告自动枚举时该不该跳过这类卷。可移动盘（U 盘）不跳过：
+// 它们和本地盘一样有按用户分的回收站。
+func skipVolume(typ uint32) bool {
+	switch typ {
+	case windows.DRIVE_REMOTE, windows.DRIVE_CDROM, windows.DRIVE_NO_ROOT_DIR:
+		return true
+	}
+	return false
 }
 
 // FiletimeToTime 把 $I 里的 FILETIME（UTC 100ns 拍）换成本地时刻。
@@ -125,6 +277,11 @@ func parseIFile(iPath string) (*iHead, error) {
 	if err != nil {
 		return nil, err
 	}
+	return parseIBytes(raw)
+}
+
+// parseIBytes 只做解码，不碰文件，好让 Scan 把「读」和「算」分开计时。
+func parseIBytes(raw []byte) (*iHead, error) {
 	if len(raw) < 28 {
 		return nil, fmt.Errorf("文件太短，只有 %d 字节", len(raw))
 	}
@@ -227,8 +384,17 @@ func baseName(path string) string {
 // Scan 扫描可见条目，返回 (条目, 异常记录, 截断说明)。
 // maxScan>0 且总数超过它时，只按 $I 写入时间取最老的 maxScan 个解析，其余留给下一轮。
 func Scan(dirs []BinDir, maxScan int) (items []*Item, issues []string, overflow *Overflow) {
+	return ScanTimed(dirs, maxScan, nil)
+}
+
+// ScanTimed 与 Scan 完全同义，只是额外把各段耗时和逐条计数写进 stats（传 nil 表示不计）。
+// stats 的 Build/Write/CSV 三段不在这里填：分区构建属于 engine，落盘属于调用方。
+func ScanTimed(dirs []BinDir, maxScan int, stats *Stats) (items []*Item, issues []string, overflow *Overflow) {
+	if stats == nil {
+		stats = &Stats{}
+	}
 	if len(dirs) == 0 {
-		d, err := BinDirs(nil)
+		d, err := BinDirsTimed(nil, stats)
 		if err != nil {
 			return nil, []string{err.Error()}, nil
 		}
@@ -236,26 +402,41 @@ func Scan(dirs []BinDir, maxScan int) (items []*Item, issues []string, overflow 
 	}
 
 	type dirEntry struct {
-		drive  string
-		root   string
-		iNames []string
-		rNames []string
-		iStems map[string]bool
+		drive   string
+		root    string
+		iNames  []string
+		rNames  []string
+		iStems  map[string]bool
+		rStems  map[string]bool
+		iStamps map[string]int64 // $I 文件名 -> 写入时间（微秒），来自列目录本身
 	}
 	var perDir []dirEntry
 	total := 0
 	for _, bd := range dirs {
+		t := time.Now()
 		names, err := os.ReadDir(bd.Path)
+		spent := time.Since(t)
+		ds := stats.drive(bd.Drive)
+		ds.List += spent
+		stats.List += spent
 		if err != nil {
 			issues = append(issues, fmt.Sprintf("%s: 无法列出目录 (%v)", bd.Path, err))
 			continue
 		}
-		de := dirEntry{drive: bd.Drive, root: bd.Path}
+		stats.Entries += len(names)
+		ds.Entries = len(names)
+		de := dirEntry{drive: bd.Drive, root: bd.Path, iStamps: map[string]int64{}}
 		for _, e := range names {
 			n := e.Name()
 			switch {
 			case strings.HasPrefix(n, "$I"):
 				de.iNames = append(de.iNames, n)
+				// DirEntry.Info() 用的是列目录时已经拿到的查找数据，不再发一次系统调用；
+				// --max-scan 截断要按写入时间排序时就直接用它（取时间戳的代价从
+				// 「每个 $I 一次 FindFirstFile+FindClose」变成 0）。
+				if fi, ierr := e.Info(); ierr == nil {
+					de.iStamps[n] = fi.ModTime().UnixMicro()
+				}
 			case strings.HasPrefix(n, "$R"):
 				de.rNames = append(de.rNames, n[2:])
 			}
@@ -265,6 +446,13 @@ func Scan(dirs []BinDir, maxScan int) (items []*Item, issues []string, overflow 
 		for _, n := range de.iNames {
 			de.iStems[n[2:]] = true
 		}
+		// 这次列目录已经把 $R 名单全拿到了，存成大写集合就能在内存里判「$R 数据还在不在」，
+		// 不必逐条再发一次 GetFileAttributes。NTFS 本身不区分大小写，用大写键比原来的
+		// lexists 口径更宽（同名不同写法的配对照样认），孤儿判断仍按原名逐字符比。
+		de.rStems = make(map[string]bool, len(de.rNames))
+		for _, stem := range de.rNames {
+			de.rStems[strings.ToUpper(stem)] = true
+		}
 		perDir = append(perDir, de)
 		total += len(de.iNames)
 	}
@@ -272,6 +460,7 @@ func Scan(dirs []BinDir, maxScan int) (items []*Item, issues []string, overflow 
 	capped := maxScan > 0 && total > maxScan
 	pickedByDrive := map[string][]string{}
 	if capped {
+		t := time.Now()
 		type dated struct {
 			stamp int64
 			drive string
@@ -280,7 +469,11 @@ func Scan(dirs []BinDir, maxScan int) (items []*Item, issues []string, overflow 
 		list := make([]dated, 0, total)
 		for _, de := range perDir {
 			for _, name := range de.iNames {
-				stamp, _ := winfs.ModTimeMicro(filepath.Join(de.root, name))
+				stamp, ok := de.iStamps[name]
+				if !ok {
+					// 列目录没带回这个文件的时间（极少见：拿条目信息时出错），退回逐个查。
+					stamp, _ = winfs.ModTimeMicro(filepath.Join(de.root, name))
+				}
 				list = append(list, dated{stamp, de.drive, name})
 			}
 		}
@@ -296,10 +489,12 @@ func Scan(dirs []BinDir, maxScan int) (items []*Item, issues []string, overflow 
 		for _, d := range list[:maxScan] {
 			pickedByDrive[d.drive] = append(pickedByDrive[d.drive], d.name)
 		}
+		stats.Cap += time.Since(t)
 	}
 
 	byDrive := map[string][2]int{}
 	for _, de := range perDir {
+		ds := stats.drive(de.drive)
 		picked := de.iNames
 		if capped {
 			picked = append([]string(nil), pickedByDrive[de.drive]...)
@@ -308,8 +503,21 @@ func Scan(dirs []BinDir, maxScan int) (items []*Item, issues []string, overflow 
 		byDrive[de.drive] = [2]int{len(picked), len(de.iNames)}
 		for _, name := range picked {
 			iPath := filepath.Join(de.root, name)
+			var head *iHead
+			tRead := time.Now()
+			raw, err := os.ReadFile(iPath)
+			spent := time.Since(tRead)
+			stats.ReadI += spent
+			ds.Read += spent
+			stats.Reads++
+			ds.Reads++
+			if err == nil {
+				tParse := time.Now()
+				head, err = parseIBytes(raw)
+				stats.ParseI += time.Since(tParse)
+			}
 			var item *Item
-			if head, err := parseIFile(iPath); err != nil {
+			if err != nil {
 				issues = append(issues, fmt.Sprintf("%s: 解析失败 (%v)", iPath, err))
 				item = &Item{
 					MetaVersion: -1,
@@ -326,7 +534,12 @@ func Scan(dirs []BinDir, maxScan int) (items []*Item, issues []string, overflow 
 			item.Drive = de.drive
 			item.IPath = iPath
 			item.RPath = rPath
-			item.Exists = winfs.Exists(rPath)
+			tStat := time.Now()
+			item.Exists = de.rStems[strings.ToUpper(name[2:])]
+			spent = time.Since(tStat)
+			stats.StatR += spent
+			ds.Stat += spent
+			stats.Checks++
 			if !item.Exists {
 				issues = append(issues, fmt.Sprintf("%s: 对应 $R 数据不存在（残留元数据）", iPath))
 			}
